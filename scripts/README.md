@@ -18,6 +18,7 @@ worker's state files.
 | `run_btc_eth_rs.py` | BTC/ETH relative-strength experiment. Four variants: baseline_v2, supertrend_only, supertrend + RS filter, supertrend + RS sizing. ETH used as market context only (not traded). | #5 |
 | `run_multiasset_supertrend_rs.py` | Multi-asset SuperTrend + RS with BTC and ETH as a one-position-at-a-time portfolio. Five variants including ETH-as-traded-asset solo and the multi-asset combination. | #12 |
 | `run_eth_vs_btc_analysis.py` | Diagnostic comparison of ETH vs BTC SuperTrend results. Trade-level, trend-quality, market-structure metrics; two rotation selectors. Research-only, does not change the strategy. | #13 |
+| `run_hmm_regime.py` | Optional 2-state Gaussian HMM regime overlay on SuperTrend(10, 3), BTC and ETH separately. Per-fold fit + train-only state mapping. Requires `hmmlearn`; falls back cleanly with an install hint if missing. | #6 |
 | `replay_live.py` | Replay mode — feed historical bars through the live engine at any speed. Educational / intuition-building tool. Does not trade, does not write to `state/`. | — |
 | `test_markov_regime.py` | Unit-style validators for the Markov module. Not an experiment. | — |
 

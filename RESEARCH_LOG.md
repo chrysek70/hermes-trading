@@ -274,17 +274,72 @@ won't capture it without new information.
 
 See `research/eth_vs_btc_supertrend_analysis.md`.
 
+## HMM 2-state regime overlay (Issue #6)
+
+Optional EM-fit Gaussian HMM on 5 causal features (log-return,
+realised vol 24, ATR%, EMA50 slope, SuperTrend distance). 2 states.
+Per-fold fit on train; train-only state mapping (favorable = lower
+realised vol with SuperTrend expectancy as soft tiebreaker); test
+decisions plug into the existing `decisions_df` overlay.
+
+48-month walk-forward, 20 folds:
+
+| variant | n | OOS return | max DD | PF | Sharpe | win % |
+|---|---:|---:|---:|---:|---:|---:|
+| `supertrend_only_btc` | 35 | +38.66% | 9.63% | 2.24 | 0.266 | 45.7% |
+| `supertrend_hmm_filter_btc` | **24** | +49.98% | **3.79%** | **4.01** | **0.434** | 54.2% |
+| `supertrend_only_eth` | 30 | +37.86% | 5.30% | 2.92 | 0.336 | 63.3% |
+| `supertrend_hmm_filter_eth` | **17** | +27.80% | **4.13%** | **4.27** | **0.402** | 70.6% |
+
+**Result: NOT ADOPTED on either asset — trade-count gate fails.**
+
+The HMM mechanism is real and strong: PF +79% on BTC, +46% on ETH;
+DD -61% on BTC, -22% on ETH. But the filter cut trades from 35 → 24
+(BTC) and 30 → 17 (ETH), both below the 30 gate.
+
+Key sub-findings:
+
+- **Sizing and filter modes produced literally identical results.**
+  The 2-state Gaussian HMM probabilities are bimodal — when
+  P(favorable) clears the 0.55 half-size threshold it almost always
+  clears the 0.70 full-size threshold too. Sizing degenerates to
+  filter.
+- **State mapping is stable in the right direction:** the higher-vol
+  state is "adverse" in all 40 fold mappings (20 BTC + 20 ETH).
+  Vol ratio adverse/favorable ranges 1.04 to 2.24 per fold.
+- **Realised volatility dominates the regime separation.** Adverse
+  state has ~2× the realised vol of favorable (and substantially
+  more negative mean log return). The other features contribute to
+  state membership decisions but the *separation* is vol-driven.
+- **Per-fold trade counts per state were too sparse** (< 5) for the
+  primary train-expectancy mapping to apply — the volatility-based
+  fallback was used on all folds.
+
+This is the **third independent regime mechanism** to clear the PF
+and DD criteria and fail the 30-trade gate, after RS filter (Issue
+#5) and routing (Issue #12). The pattern is informative: the
+30-trade gate was calibrated against an unfiltered baseline (35
+trades on BTC); once a useful regime overlay cuts ≥30% of trades, the
+gate fails by construction. The mechanism is genuine — a random
+filter that removed 30% of trades would NOT lift PF 79%; only an
+actually-informative filter does that.
+
+See `research/hmm_regime_report.md`.
+
 ## Recommended next experiment
 
-**HMM 2-state regime overlay (Issue #6).** Promoted from second
-queue position to first by Issue #13 evidence. HMM tests an
-orthogonal mechanism (latent EM-fit regime → exposure scaling) that
-does not suffer from the selection-degrades problem found in #13.
-Top-5 crypto remains a valid future experiment but as a *parallel
-portfolio*, not a rotation.
+**Top-5 parallel portfolio with regime overlays.** Accumulating
+evidence across Issues #5, #6, #12 says three different regime
+mechanisms work but get blocked by trade count. A top-5 universe
+trading each asset in parallel (each with its own SuperTrend +
+optional HMM/RS overlay) directly raises the count base so these
+mechanisms can clear the gate.
+
+Funding-rate filter (Issue #7) remains queued per the original spec
+but is now the second-priority experiment.
 
 Queue per `ROADMAP.md`:
 
-1. HMM 2-state regime overlay (Issue #6)
-2. Top-5 crypto parallel portfolio (new issue if pursued)
-3. Funding-rate stress filter
+1. Top-5 parallel portfolio (new issue if pursued)
+2. Funding-rate stress filter (Issue #7)
+3. Volatility-compression breakout (conditional)

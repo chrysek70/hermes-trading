@@ -21,6 +21,9 @@ state/reflect_state.json
 state/data/
 results/trades_*.csv
 
+# Intermediate machine-readable dumps from research runners
+results/.*.json
+
 # Research scratch
 research/github_refs/
 

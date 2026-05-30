@@ -55,6 +55,8 @@ tuning to make a variant cross the bar after the fact.
 | **ETH SuperTrend(10, 3) solo (Issue #12 side finding)** | **2.92** | **+37.86%** | **adopted as research candidate**: 30 trades exactly at the gate, max DD 5.30% (best of any SuperTrend variant), 63.3% win rate, Sharpe 0.336. Surprise discovery — SuperTrend is cleaner on ETH 4h than BTC 4h over this window. Live worker NOT modified. See `research/multiasset_supertrend_rs_report.md`. |
 | ETH SuperTrend + RS sizing (Issue #12) | 3.05 | +17.33% | not adopted: 21 trades, 8/20 folds positive (worse than baseline). The symmetric RS overlay chokes off ETH's actually-winning trades (ETH-stronger condition rare in this window). |
 | **Multi-asset SuperTrend + RS, one position (Issue #12)** | **2.48** | **+40.99%** | **adopted as research candidate**: 39 trades, max DD 9.61% (by 0.02 pp), 12/20 folds positive (better than BTC baseline). Universe expansion thesis validated — clears the 30-trade gate that BTC-only RS missed. BTC contributes 26/13 trades and most return; ETH lifts the count past the gate. |
+| HMM regime overlay on BTC SuperTrend (Issue #6) | 4.01 | +49.98% | not adopted: PF +79% over BTC baseline (huge), DD -61% (3.79% from 9.63%), Sharpe 0.434, but 24 trades — fails 30-trade gate. Filter and sizing modes identical (bimodal HMM probabilities). |
+| HMM regime overlay on ETH SuperTrend (Issue #6) | 4.27 | +27.80% | not adopted: PF +46% over ETH baseline, DD -22% (4.13% from 5.30%), but 17 trades — fails 30-trade gate badly. |
 
 ## Rejected experiment patterns
 
@@ -71,20 +73,20 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **HMM 2-state regime overlay (Issue #6) — promoted to top after
-   Issue #13 evidence.** Issue #13 found that the rotation mechanism
-   itself hurts: two simple per-bar selectors on the BTC-ETH universe
-   produced strictly worse PF and DD than ETH solo. There is no
-   per-bar asset-quality signal in existing SuperTrend + RS information.
-   HMM tests an orthogonal mechanism (latent regime → exposure scaling)
-   that does not suffer from this selection problem.
+1. **Top-5 parallel portfolio with regime overlays.** Promoted to top
+   after Issue #6 evidence. Three independent regime mechanisms now
+   (RS filter Issue #5, multi-asset routing Issue #12, HMM Issue #6)
+   have cleared the PF / DD criteria and failed the 30-trade gate.
+   The signal is real; the count base is the blocker. Trading 5
+   assets in parallel (each with its own SuperTrend + optional regime
+   overlay) is the direct way to multiply the trade-count base into
+   a regime where these overlays clear the gate.
 
-2. **Top-5 universe as a parallel portfolio (not a rotation).**
-   Demoted from #1 by Issue #13. Top-5 SuperTrend trading 5 assets
-   *in parallel* (no rotation, sized down per asset) is still a valid
-   trade-count-builder experiment. But a top-5 *rotation* is likely to
-   repeat the selector-degrades pattern seen in #13. Queue this as a
-   parallel-portfolio variant only.
+2. **Funding-rate stress filter (Issue #7).** Per the original spec,
+   Issue #7 was the next-on-HMM-failure step. Tests an orthogonal
+   mechanism (perpetuals funding rate → exposure gating). Requires a
+   new data adapter. Lower priority than the parallel portfolio
+   given the accumulated evidence, but still on the queue.
 
 3. **Funding-rate stress filter.**
    Hypothesis: extreme perpetuals funding precedes squeezes; gate

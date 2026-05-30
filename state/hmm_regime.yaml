@@ -1,0 +1,34 @@
+# Optional 2-state Gaussian HMM regime detector.
+#
+# Used by `scripts/run_hmm_regime.py` (Issue #6) as a soft alternative
+# to the hand-defined 6-state Markov model. Per-fold EM-fit on causal
+# features; train-only state mapping; test-time decisions feed the
+# existing decisions_df plumbing.
+#
+# Hard rules locked at experiment start:
+#   - n_states fixed at 2.
+#   - Feature list fixed (do NOT add new ones in this experiment).
+#   - random_state fixed for reproducibility.
+#   - No parameter sweeps. To try a different config, write a new
+#     experiment with a new issue number.
+
+hmm_regime:
+  enabled: true
+  n_states: 2
+  covariance_type: full
+  n_iter: 200
+  random_state: 42
+  features:
+    - log_return
+    - realized_vol_24
+    - atr_pct
+    - ema50_slope
+    - supertrend_distance_pct
+  sizing:
+    favorable_prob_full: 0.70
+    favorable_prob_half: 0.55
+    adverse_prob_block: 0.70
+    min_size: 0.0
+    half_size: 0.5
+    full_size: 1.0
+  min_trades_for_setup_mapping: 5

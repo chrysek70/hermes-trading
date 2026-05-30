@@ -179,6 +179,29 @@ stronger than BTC, which is the minority condition over this period).
 
 Live worker unchanged. See `research/multiasset_supertrend_rs_report.md`.
 
+## HMM regime overlay (Issue #6)
+
+Optional EM-fit 2-state Gaussian HMM on causal market features
+(log-return, realised vol, ATR%, EMA50 slope, SuperTrend distance).
+Per-fold fit on train only; volatility-based state mapping
+(favorable = lower vol). Decisions plumbed through the existing
+`decisions_df` overlay.
+
+| variant | trades | OOS return | max DD | PF | win % |
+|---|---:|---:|---:|---:|---:|
+| `supertrend_only_btc` (reference) | 35 | +38.66% | 9.63% | 2.24 | 45.7% |
+| `supertrend_hmm_filter_btc` | **24** | +49.98% | **3.79%** | **4.01** | 54.2% |
+| `supertrend_only_eth` (reference) | 30 | +37.86% | 5.30% | 2.92 | 63.3% |
+| `supertrend_hmm_filter_eth` | **17** | +27.80% | **4.13%** | **4.27** | 70.6% |
+
+**Not adopted** — fails the 30-trade gate on both assets, even
+though PF lifts +79% (BTC) / +46% (ETH) and DD drops -61% (BTC)
+/ -22% (ETH). Third regime mechanism in this repo to clear PF / DD
+and fail trade count (after RS filter and routing). Pattern argues
+for a parallel multi-asset extension as the natural next step.
+Optional dependency — `hmmlearn` not required by the live worker.
+See `research/hmm_regime_report.md`.
+
 ## Disclaimer
 
 This repository is **research code**. No part of it is financial advice,
