@@ -71,19 +71,20 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **Broader top-5 crypto rotation (recommended after #12 success).**
-   Direct follow-up to Issue #12's clean pass: universe expansion just
-   *worked* (39 trades, PF 2.48, both gates cleared). The natural next
-   step is to expand the universe to ~5 assets (BTC, ETH, SOL, AVAX,
-   LINK or similar) on the same SuperTrend(10, 3) engine, possibly with
-   a small concurrent-position budget (2 of 5) instead of strict
-   one-at-a-time. Also a clean way to look for more ETH-quality signals
-   (low DD, high PF, mid frequency).
+1. **HMM 2-state regime overlay (Issue #6) — promoted to top after
+   Issue #13 evidence.** Issue #13 found that the rotation mechanism
+   itself hurts: two simple per-bar selectors on the BTC-ETH universe
+   produced strictly worse PF and DD than ETH solo. There is no
+   per-bar asset-quality signal in existing SuperTrend + RS information.
+   HMM tests an orthogonal mechanism (latent regime → exposure scaling)
+   that does not suffer from this selection problem.
 
-2. **HMM 2-state regime overlay (optional `hmmlearn` dep) — Issue #6.**
-   Hypothesis: latent states found by EM are cleaner than the hand-defined
-   6-state Markov alphabet; soft probabilities feed exposure scaling.
-   Orthogonal to universe expansion — can stack later.
+2. **Top-5 universe as a parallel portfolio (not a rotation).**
+   Demoted from #1 by Issue #13. Top-5 SuperTrend trading 5 assets
+   *in parallel* (no rotation, sized down per asset) is still a valid
+   trade-count-builder experiment. But a top-5 *rotation* is likely to
+   repeat the selector-degrades pattern seen in #13. Queue this as a
+   parallel-portfolio variant only.
 
 3. **Funding-rate stress filter.**
    Hypothesis: extreme perpetuals funding precedes squeezes; gate

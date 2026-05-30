@@ -240,16 +240,51 @@ construction; symmetry does not equal generality.
 
 See `research/multiasset_supertrend_rs_report.md`.
 
+## ETH vs BTC SuperTrend diagnostic (Issue #13)
+
+Research-only analysis on the Issue #12 result. Asked: why did ETH
+beat BTC, was it luck or structural, would a selector help?
+
+Findings:
+
+- **Trend structure is identical.** BTC 205 flips vs ETH 209; mean
+  run 42.6 vs 41.7 bars; ADX 28.1 vs 27.7; % time trending 97.4% vs
+  97.1%. SuperTrend behaviour is indistinguishable between the two
+  assets.
+- **The win-rate gap is the whole mechanism.** BTC 45.7% vs ETH 63.3%
+  (+17.6 pp). ETH's average winner is actually *smaller* (+2.71% vs
+  +3.98%); the PF gap comes from winning more often.
+- **ATR percentage is the single structural driver.** ETH ATR mean
+  2.01% vs BTC 1.47% — ETH is 36% more volatile per bar. Same
+  SuperTrend multiplier (3.0×) gives ETH a structurally wider band
+  that survives more intra-trend noise.
+- **Per-fold the assets are tied.** BTC mean fold return +1.73% σ
+  4.10%; ETH +1.69% σ 3.98%. BTC won 8 folds, ETH won 10, 2 tied —
+  effectively a coin flip. The 18-pp win-rate gap is at the edge of
+  statistical significance (z ≈ 1.4).
+- **Both rotation selectors HURT vs ETH solo.** Tested two per-bar
+  selectors (SuperTrend distance / ATR; RS score). Both gave worse PF
+  (2.12 / 2.01 vs 2.92), nearly doubled DD (10.09% vs 5.30%) and lower
+  Sharpe. There is no per-bar asset-quality signal in existing
+  SuperTrend + RS information.
+
+Read: ETH's edge is plausibly real (driven by the ATR% structural
+fit) but smaller than headline metrics suggest. A rotation overlay
+won't capture it without new information.
+
+See `research/eth_vs_btc_supertrend_analysis.md`.
+
 ## Recommended next experiment
 
-**Broader top-5 crypto rotation.** Universe expansion just worked
-(Issue #12). The natural next step is BTC + ETH + SOL + AVAX + LINK
-(or similar) on the same SuperTrend(10, 3) engine, possibly with a
-small concurrent-position budget. This is also a clean way to look
-for more ETH-quality signals on other liquid mid-caps.
+**HMM 2-state regime overlay (Issue #6).** Promoted from second
+queue position to first by Issue #13 evidence. HMM tests an
+orthogonal mechanism (latent EM-fit regime → exposure scaling) that
+does not suffer from the selection-degrades problem found in #13.
+Top-5 crypto remains a valid future experiment but as a *parallel
+portfolio*, not a rotation.
 
 Queue per `ROADMAP.md`:
 
-1. Top-5 crypto rotation (new issue)
-2. HMM 2-state regime overlay (Issue #6)
+1. HMM 2-state regime overlay (Issue #6)
+2. Top-5 crypto parallel portfolio (new issue if pursued)
 3. Funding-rate stress filter
