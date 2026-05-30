@@ -1,6 +1,33 @@
-
-.env
+# Virtualenvs and Python caches
+.venv/
 __pycache__/
 *.pyc
-results/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.cache/
+
+# Local secrets / env
+.env
+.env.*
+
+# Ephemeral live-worker state (regenerated at runtime)
+state/heartbeat.json
+state/position.json
+state/reflect_state.json
+
+# Large regenerable market data and detailed trade CSVs
 state/data/
+results/trades_detailed_*.csv
+results/trades_donchian_detailed_*.csv
+
+# Research scratch
+research/github_refs/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
