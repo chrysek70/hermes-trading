@@ -1,0 +1,35 @@
+version: "v2-01"
+rsi_period: 14
+
+# The GATE — longs only when the fast trend EMA is above the slow one.
+regime:
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+
+setups:
+  # Mean-reversion: buy an oversold pullback to the 21 EMA, in an uptrend.
+  pullback:
+    enabled: true
+    rsi_threshold: 32
+    pullback_ema: 21
+    ema_tol: 0.002        # how close to the 21 EMA counts as "at" it
+    exit:
+      type: mean_revert
+      target_rsi: 55       # take profit when momentum recovers
+      stop_atr_mult: 1.2   # initial stop = 1.2 * ATR below entry
+
+  # Momentum: 3-bar play breakout, confirmed above VWAP. Let winners run.
+  breakout:
+    enabled: true
+    require_above_vwap: true
+    ignition_atr_mult: 1.0
+    exit:
+      type: trail
+      trail_ema: 21        # trail the stop under the 21 EMA
+      stop_atr_mult: 1.5
+
+risk:
+  atr_period: 14
+  position_size_r: 0.5
+  max_hold_bars: 240       # time stop (bars)
+  regime_flip_exit: true   # exit if EMA50 crosses back below EMA200

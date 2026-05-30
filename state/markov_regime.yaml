@@ -1,0 +1,105 @@
+# Markov / regime detection configuration.
+# Schema v2 — supports modes, hysteresis, multi-timeframe, strategy routing.
+# Live worker is NOT wired to this yet (see Phase 12); used by backtest /
+# walk_forward / run_markov_research only.
+
+enabled: false
+# modes:
+#   disabled                  — model classifies for diagnostics only
+#   hard_filter               — legacy v1 behaviour, binary long permission
+#   soft_sizing               — continuous size_multiplier in [min_score, max_score]
+#   bad_regime_avoidance      — reduce/block size only in states bad on TRAIN
+#   regime_features_only      — model runs, tags trades, NEVER sizes or gates
+#   strategy_routing          — per-state allowed_setups + size_multiplier
+mode: soft_sizing
+
+model:
+  type: discrete_markov
+  order: 1
+  smoothing_alpha: 1.0    # Laplace smoothing for transition matrix rows
+
+state:
+  method: hysteresis_discrete
+  return_window: 12
+  vol_window: 14
+  up_return_threshold: 0.003
+  down_return_threshold: -0.003
+  high_vol_threshold: 0.008
+  hysteresis_bars: 3      # raw state must persist N bars before stable_state flips
+
+# Soft sizing. size_multiplier = clamp(score, min_score, max_score) where:
+#   score = current_state_weight * (1 if stable_state in favorable else 0)
+#         + transition_weight    * Σ next-state probs into favorable_states
+sizing:
+  min_score: 0.25
+  max_score: 1.00
+  neutral_score: 1.00     # used when model unfittable / insufficient data
+  favorable_states:
+    - up_low_vol
+    - up_high_vol
+    - sideways_low_vol
+  unfavorable_states:
+    - down_high_vol
+  current_state_weight: 0.30
+  transition_weight: 0.70
+
+# Bad-regime avoidance — applied ONLY using per-state metrics computed on the
+# TRAIN slice of each walk-forward fold. Test slice never informs the set.
+bad_regime_avoidance:
+  min_trades_per_state: 20         # ignore states with too-few train trades
+  min_profit_factor: 1.0           # below this → "bad enough to reduce"
+  min_expectancy: 0.0              # below this → "bad enough to reduce"
+  reduce_size_to: 0.25             # multiplier applied when state is "bad"
+  block_if_pf_below: 0.7           # if train PF below this → block entirely
+
+# Multi-timeframe regime scoring. State classifier is fit independently on
+# each TF; per-bar score is a weighted average reindexed to the decision TF.
+multi_timeframe:
+  enabled: true
+  weights:
+    1h: 0.50
+    4h: 0.35
+    1d: 0.15
+
+# Strategy routing — per-state setup permission + size multiplier.
+# Backtester filters entries by setup name; setups not listed are blocked.
+strategy_routing:
+  enabled: false
+  routes:
+    up_low_vol:
+      allowed_setups: [breakout, pullback]
+      size_multiplier: 1.00
+    up_high_vol:
+      allowed_setups: [breakout]
+      size_multiplier: 0.75
+    sideways_low_vol:
+      allowed_setups: [pullback]
+      size_multiplier: 0.75
+    sideways_high_vol:
+      allowed_setups: [pullback]
+      size_multiplier: 0.50
+    down_low_vol:
+      allowed_setups: []
+      size_multiplier: 0.00
+    down_high_vol:
+      allowed_setups: []
+      size_multiplier: 0.00
+
+# Legacy hard_filter knobs (kept for back-compat with v1 markov experiments)
+allowed_long_states:
+  - up_low_vol
+  - up_high_vol
+  - sideways_low_vol
+min_prob_same_or_up: 0.55
+
+# Walk-forward validation guardrails enforced by run_markov_research.py.
+validation:
+  walk_forward_only: true
+  train_months: 12
+  test_months: 3
+  embargo_bars: 24
+
+# Fit-window knobs (existing — retained).
+lookback_bars: 200
+min_training_bars: 500
+use_as_filter: true

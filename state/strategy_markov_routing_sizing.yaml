@@ -1,0 +1,71 @@
+# Phase-5 combined Markov experiment: routing chooses WHICH setups, soft-
+# sizing chooses HOW BIG. Direction is still decided by the base signal
+# layer — Markov never predicts up/down here, only modulates exposure.
+
+enabled: false        # walk_forward / runner force-enable via --markov-enable
+mode: routing_sizing
+
+model:
+  type: discrete_markov
+  order: 1
+  smoothing_alpha: 1.0
+
+state:
+  method: hysteresis_discrete
+  return_window: 12
+  vol_window: 14
+  up_return_threshold: 0.003
+  down_return_threshold: -0.003
+  high_vol_threshold: 0.008
+  hysteresis_bars: 3
+
+# Soft-sizing math — used in routing_sizing mode to scale size within allowed states.
+sizing:
+  min_score: 0.25
+  max_score: 1.00
+  neutral_score: 1.00
+  favorable_states:
+    - up_low_vol
+    - up_high_vol
+    - sideways_low_vol
+  unfavorable_states:
+    - down_high_vol
+  current_state_weight: 0.30
+  transition_weight: 0.70
+
+# Per-state routing — allowed_setups gate setup names; size_multiplier=0 is a
+# hard block that wins over soft sizing (e.g., down regimes).
+strategy_routing:
+  enabled: true
+  routes:
+    up_low_vol:
+      allowed_setups: [breakout, pullback]
+      size_multiplier: 1.00
+    up_high_vol:
+      allowed_setups: [breakout]
+      size_multiplier: 0.75
+    sideways_low_vol:
+      allowed_setups: [pullback]
+      size_multiplier: 0.75
+    sideways_high_vol:
+      allowed_setups: [pullback]
+      size_multiplier: 0.50
+    down_low_vol:
+      allowed_setups: []
+      size_multiplier: 0.00
+    down_high_vol:
+      allowed_setups: []
+      size_multiplier: 0.00
+
+multi_timeframe:
+  enabled: false
+
+# Walk-forward validation knobs (informational — runner uses CLI defaults).
+validation:
+  walk_forward_only: true
+  train_months: 12
+  test_months: 3
+  embargo_bars: 24
+
+lookback_bars: 200
+min_training_bars: 500
