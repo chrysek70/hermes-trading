@@ -113,21 +113,57 @@ realise (Phase 3's "16+ bars → PF 15.84" finding) appears to be
 working here, but the signal fires roughly 4–5 times per year on 4h
 BTC — too rare to confirm at 24-month horizon.
 
-Per the locked criteria: not adopted. The result is "promising
+Per the locked criteria: not adopted at 24mo. The result is "promising
 under-sampled signal", not "working strategy". See
-`research/supertrend_report.md`.
+`research/supertrend_report.md`. Follow-up at 48mo below.
+
+## SuperTrend(10, 3) on 48-month history (Issue #11)
+
+Same code, same parameters (period=10, multiplier=3.0), same fees,
+same fold sizing (train 1440 / test 360 / embargo 6). Only the data
+window changed: 24 → 48 months. NOT a parameter tune.
+
+48-month walk-forward, 20 folds, BTC/USDT 4h:
+
+| variant | n | OOS return | max DD | PF | Sharpe | win % | folds+ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 103 | +3.28% | 12.74% | 1.09 | 0.027 | 25.2% | 8/20 |
+| **`supertrend_only`** | **35** | **+38.66%** | 9.63% | **2.24** | **0.266** | **45.7%** | **10/20** |
+| `supertrend_plus_routing` | 20 | +29.56% | **5.95%** | 3.16 | 0.337 | 50.0% | 8/20 |
+
+**`supertrend_only` clears both adoption gates**: PF 2.24 > 1.69 and
+35 ≥ 30. First variant since v2 itself to do so on a clean OOS
+walk-forward. **Adopted as a research candidate.** Live worker
+unchanged.
+
+The 24-month result was clearly under-sampled noise around the
+true edge: doubling the window quadrupled trades (9 → 35) and the PF
+compressed from 9.02 to 2.24 — still 1.3× the gate. Win rate fell
+77.8% → 45.7%, exactly what you'd expect as the sample stops being
+dominated by a few clean trends.
+
+`supertrend_plus_routing` has the best risk profile (DD 5.95%, win
+50.0%, PF 3.16, Sharpe 0.337) but **fails the trade-count gate** at
+20. The locked criteria explicitly refuse the move "adopt the
+variant that filters to its best subset". Tracked as a candidate
+sizing overlay for after Issue #5.
+
+Baseline (v2 long-short) on the 48mo window degraded to PF 1.09 from
+PF 1.69 on 24mo. This is itself informative: the original 24mo
+baseline was a favorable window for the pullback/breakout setups, not
+the floor it appeared to be.
+
+See `research/supertrend_48mo_report.md`.
 
 ## Recommended next experiment
 
-**Re-run SuperTrend(10, 3) on extended history (48 months).** Same
-parameters, same code. This is the standard way to test whether a
-9-trade signal generalises — not a parameter tune. If extended-history
-PF stays above baseline AND trade count crosses the 30 gate, adopt
-SuperTrend. If either fails, close and move to BTC/ETH RS rotation.
+**BTC/ETH relative-strength rotation (Issue #5).** Independent benefit
+(cross-asset signal) plus a clean way to double the SuperTrend trade
+count, which is the path to validating the routing overlay (which
+passed PF but failed the trade-count gate on 48mo BTC alone).
 
 Queue per `ROADMAP.md`:
 
-1. SuperTrend on extended history (48mo)
-2. BTC/ETH relative-strength rotation
-3. HMM 2-state regime overlay (optional `hmmlearn` dep)
-4. Funding-rate stress filter
+1. BTC/ETH relative-strength rotation
+2. HMM 2-state regime overlay (optional `hmmlearn` dep)
+3. Funding-rate stress filter

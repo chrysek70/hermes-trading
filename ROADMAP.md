@@ -45,8 +45,11 @@ tuning to make a variant cross the bar after the fact.
 | Regime-based HODL sizing | — | -44% to +9% | rejected: every variant underperformed naive HODL |
 | Donchian-20 trend-following | 0.90 | -2.16% | rejected: trend mechanism partial (16+ bars: PF 15.84) but short-holds destroy it |
 | Donchian + strategy_routing | 0.84 | -2.97% | rejected: routing slightly hurt Donchian |
-| SuperTrend(10, 3) trend-following | 9.02 | +13.00% | **not adopted**: only 9 OOS trades — fails trade-count gate (≥30) despite passing PF gate by ~5×. Promising under-sampled. See `research/supertrend_report.md`. |
-| SuperTrend + strategy_routing | 34.54 | +2.47% | rejected: routing cut signal further (9 → 4 trades); PF inflated by tiny sample |
+| SuperTrend(10, 3) trend-following (24mo) | 9.02 | +13.00% | **not adopted**: only 9 OOS trades — fails trade-count gate (≥30) despite passing PF gate by ~5×. Promising under-sampled. See `research/supertrend_report.md`. |
+| SuperTrend + strategy_routing (24mo) | 34.54 | +2.47% | rejected: routing cut signal further (9 → 4 trades); PF inflated by tiny sample |
+| **SuperTrend(10, 3) on 48mo (Issue #11)** | **2.24** | **+38.66%** | **adopted as research candidate**: 35 OOS trades, max DD 9.63%, 10/20 folds positive — first variant since v2 to clear both gates. Same code, no parameter changes. Live worker NOT modified. See `research/supertrend_48mo_report.md`. |
+| SuperTrend + strategy_routing (48mo) | 3.16 | +29.56% | not adopted: best risk profile (DD 5.95%, win 50.0%, Sharpe 0.337) but 20 trades — fails count gate. Tracked as a candidate sizing overlay for after BTC/ETH (Issue #5). |
+| v2 baseline on 48mo (sanity ref) | 1.09 | +3.28% | reference only — baseline degrades materially on extended window (PF 1.69 → 1.09), indicating the original 24mo window was favorable for v2 setups. |
 
 ## Rejected experiment patterns
 
@@ -63,27 +66,22 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **SuperTrend on extended history (48mo).**
-   Follow-up to the under-sampled SuperTrend(10, 3) result above. Same
-   parameters, same code, more data. NOT a parameter tune — the standard
-   way to test whether a 9-trade signal generalises. Adopt only if PF
-   stays above baseline AND trade count crosses the 30-trade gate.
-
-2. **BTC/ETH relative-strength rotation.**
+1. **BTC/ETH relative-strength rotation. (Now top of queue — Issue #5.)**
    Hypothesis: cross-asset relative strength gates entry direction;
-   doubles sample by adding ETH on the same engine. Also implicitly
-   doubles the SuperTrend trade count by giving it a second asset to
-   fire on.
+   doubles sample by adding ETH on the same engine. Also doubles the
+   newly-adopted SuperTrend trade count by giving it a second asset
+   to fire on, which is the cleanest way to confirm the routing
+   overlay (which passed PF but failed the trade-count gate at 48mo).
 
-3. **HMM 2-state regime overlay (optional `hmmlearn` dep).**
+2. **HMM 2-state regime overlay (optional `hmmlearn` dep).**
    Hypothesis: latent states found by EM are cleaner than the hand-defined
    6-state Markov alphabet; soft probabilities feed exposure scaling.
 
-4. **Funding-rate stress filter.**
+3. **Funding-rate stress filter.**
    Hypothesis: extreme perpetuals funding precedes squeezes; gate
    direction by sign of funding. Requires a new data adapter.
 
-5. **(Conditional) volatility-compression breakout.**
+4. **(Conditional) volatility-compression breakout.**
    Hypothesis: only fire breakouts after a low-ATR-quartile compression.
    Phase-3 audit showed the `med-low` ATR bucket had PF 2.84.
 

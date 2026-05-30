@@ -108,6 +108,28 @@ Buy-and-hold BTC over the same window returned ~+27% at ~50% drawdown.
 The strategies above are risk-managed underperformers in absolute terms,
 defensible only on a risk-adjusted basis.
 
+## Extended-history validation (48mo)
+
+48-month walk-forward on BTC/USDT 4h, identical fees / slippage / fold
+size (train 1440 / test 360 / embargo 6), 20 folds, run for Issue #11:
+
+| variant | trades | OOS return | max DD | PF |
+|---|---:|---:|---:|---:|
+| baseline (no Markov) | 103 | +3.28% | 12.74% | 1.09 |
+| **SuperTrend(10, 3) only** | **35** | **+38.66%** | 9.63% | **2.24** |
+| SuperTrend + Markov routing | 20 | +29.56% | **5.95%** | 3.16 |
+
+**SuperTrend(10, 3) — first variant since v2 to clear both adoption
+gates (PF > 1.69, trades ≥ 30) on an OOS walk-forward.** Adopted as a
+research candidate. The live worker is unchanged and continues to run
+v2 long-short — SuperTrend is queued for BTC/ETH cross-asset validation
+(Issue #5) before any further consideration. See
+`research/supertrend_48mo_report.md`.
+
+The v2 baseline degrades on extended history (PF 1.69 → 1.09), which
+is itself useful evidence that the original 24mo window was a
+favorable regime for the pullback/breakout setups.
+
 ## Disclaimer
 
 This repository is **research code**. No part of it is financial advice,
