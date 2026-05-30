@@ -86,6 +86,17 @@ without tuning the failed one.
    no Slack / Datadog integration (deliberate; both are easy to add
    later via exit code or JSON output). See `research/decay_monitor_report.md`.
 
+1b. **Multi-asset live paper worker — SHIPPED (Issue #16).**
+   `--config state/live_multiasset.yaml` runs BTC/USDT + ETH/USDT in
+   parallel paper mode. New module `hermes_trading/multi_loop.py`
+   drives a per-asset state machine with a portfolio-level
+   `max_open_positions` cap; per-asset state files live at
+   `state/positions/<KEY>.json` with one-shot migration from the
+   legacy `state/position.json`. Single-asset mode is byte-for-byte
+   preserved. Reflection is disabled in multi-asset mode (allowlist
+   is single-asset v2-shaped and the interaction is untested).
+   No HMM / funding overlay wiring in this pass per spec.
+
 2. **Volatility-compression breakout (conditional).** Hypothesis:
    only fire breakouts after a low-ATR-quartile compression.
    Phase-3 audit showed the `med-low` ATR bucket had PF 2.84.

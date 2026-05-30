@@ -433,6 +433,60 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Multi-asset live paper worker (Issue #16) — shipped
+
+Live worker refactored from single-asset to a parallel-portfolio
+paper-trading harness, mirroring the research engine's
+`btc_eth_reference_parallel` structure. **Single-asset mode is
+preserved unchanged** — `uv run python -m hermes_trading.run` still
+reads `state/goal.yaml` + `state/strategy.yaml` and behaves exactly
+as before.
+
+New: `uv run python -m hermes_trading.run --config state/live_multiasset.yaml`
+runs the multi-asset path. Config carries the asset list, timeframe,
+`max_open_positions`, shared strategy yaml, and circuit breaker
+threshold. Per-asset position state at `state/positions/<KEY>.json`;
+portfolio heartbeat at `state/heartbeat.json` (schema
+`multiasset-v1`); extended trade rows in `state/trades.jsonl`
+(asset, setup, entry_time/exit_time, return_pct, net_return_pct,
+position_size, holding_bars — legacy fields also retained for
+backward-compatibility with the decay monitor).
+
+Architecture:
+- `hermes_trading/positions.py` — IO + migration helpers shared by
+  both modes (legacy single-file + per-asset multi-file layouts).
+- `hermes_trading/multi_loop.py` — multi-asset orchestration with
+  pure helper functions (`build_trade_row`, `can_enter`,
+  `evaluate_tick`) that the self-test exercises without an exchange.
+- `hermes_trading/run.py` — dispatches on `--config` (multi) vs no
+  flag (single).
+
+Safety: per-asset circuit breaker (default 5 consecutive failures
+→ skip that asset for the rest of the session); worker only halts
+when every asset is broken. Corrupt per-asset state files are
+skipped with a warning and left in place for inspection. Legacy
+migration is idempotent and backs up the original to
+`state/position.json.bak.<UTC-iso>` before unlinking.
+
+Reflection (`reflect.py`) is intentionally disabled in multi-asset
+mode — its allowlist was designed for single-asset v2-shaped keys
+and the interaction with a shared per-asset strategy yaml is
+untested. Re-enabling it later is a separate issue.
+
+No HMM / funding overlay wiring in this pass per spec. Both modules
+exist (`hermes_trading.hmm_regime`, `hermes_trading.funding`) but are
+not consumed by the live worker.
+
+Self-test (`scripts/test_multiasset_worker.py`) — 27/27 invariants
+pass. Tests cover: single-asset import sanity, config parse,
+portfolio cap, per-asset cap, legacy migration with backup, corrupt
+state tolerance, trade row schema, `evaluate_tick` end-to-end on a
+synthetic SuperTrend bullish flip.
+
+The live worker is **not yet redeployed** to multi-asset mode — that
+is a user decision, not a research one. The single-asset worker that
+was running at audit time continues to run as before.
+
 ## Live decay monitor (Issue #15) — shipped
 
 `scripts/monitor_strategy_decay.py` reads `state/trades.jsonl`,

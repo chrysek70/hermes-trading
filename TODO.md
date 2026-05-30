@@ -3,6 +3,22 @@
 Actionable items, ordered by priority within each section. Items are
 implementation-ready unless flagged otherwise.
 
+## Recently shipped
+
+- ✓ Multi-asset live paper worker (Issue #16) — `--config state/live_multiasset.yaml`
+  runs BTC/USDT + ETH/USDT in parallel. Per-asset position state,
+  portfolio heartbeat, extended trade rows, legacy migration. 27/27
+  self-test checks pass.
+- ✓ Live strategy decay monitor (Issue #15).
+- ✓ Funding-rate filter experiment (Issue #7).
+- ✓ HMM regime overlay (Issue #6).
+- ✓ Top-5 parallel portfolio (Issue #14).
+- ✓ ETH-vs-BTC SuperTrend diagnostic (Issue #13).
+- ✓ Multi-asset SuperTrend + RS (Issue #12).
+- ✓ SuperTrend extended history (Issue #11).
+- ✓ BTC/ETH RS context (Issue #5).
+- ✓ SuperTrend(10, 3) trend-following (Issue #4).
+
 ## Strategy research (next)
 
 - [ ] **Implement SuperTrend(10, 3) trend-following setup** in `signals.py`

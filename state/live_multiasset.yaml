@@ -1,0 +1,34 @@
+# Multi-asset live (paper) worker config.
+#
+# Activated via:
+#     uv run python -m hermes_trading.run --config state/live_multiasset.yaml
+#
+# Single-asset mode (default, no --config) remains unchanged and still
+# reads state/goal.yaml + state/strategy.yaml.
+
+assets:
+  - BTC/USDT
+  - ETH/USDT
+
+timeframe: 4h
+poll_seconds: 10
+indicator_limit: 300        # bars per fetch (EMA200 needs ~200)
+max_open_positions: 2
+
+# Per-asset strategy file. If a single string is given, every asset
+# uses that file. If a mapping is given, each asset reads its own
+# strategy file. In this first pass we use one strategy yaml for both
+# assets (the adopted SuperTrend(10, 3) research candidate).
+strategy: state/strategy_supertrend.yaml
+
+# Notional sizing per asset (paper only — informational, used to scale
+# the per-asset PnL display). Sum across assets <= 1.0 is unleveraged.
+size_per_asset: 0.5
+
+# Circuit breaker: a single asset is marked broken after this many
+# consecutive fetch failures. The worker continues with remaining
+# healthy assets. If every asset is broken, the worker halts.
+circuit_break_after: 5
+
+# Heartbeat schema version — bump when the structure changes.
+heartbeat_schema: "multiasset-v1"

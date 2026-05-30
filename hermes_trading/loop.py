@@ -306,18 +306,27 @@ async def run(asset: str) -> None:
                     else:
                         ret_pct = (position["entry_price"] - last) / position["entry_price"]
                     trade_return = ret_pct * position["size"]
+                    closed_at_iso = now_iso()
                     trade = {
                         "status": "closed",
                         "asset": asset,
                         "direction": direction,
                         "setup": position.get("setup"),
+                        # legacy field names — preserved for backward compatibility
                         "opened_at": position["opened_at"],
-                        "closed_at": now_iso(),
+                        "closed_at": closed_at_iso,
                         "entry_price": position["entry_price"],
                         "exit_price": last,
                         "return": trade_return,
                         "exit_reason": reason,
                         "strategy_version": strategy.get("version"),
+                        # new spec field names (Issue #16)
+                        "entry_time": position["opened_at"],
+                        "exit_time": closed_at_iso,
+                        "return_pct": ret_pct,
+                        "net_return_pct": trade_return,
+                        "position_size": float(position.get("size", 1.0)),
+                        "holding_bars": bars_held,
                     }
                     append_jsonl(STATE_DIR / "trades.jsonl", trade)
                     log(

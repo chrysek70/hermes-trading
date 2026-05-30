@@ -76,15 +76,41 @@ uv run python scripts/run_markov_research.py \
     --train-bars 1440 --test-bars 360 --embargo-bars 6
 ```
 
-### Live paper worker
+### Live paper worker — single asset (default)
 
 ```bash
 cd ~/hermes-trading && export PATH="$HOME/.local/bin:$PATH"
 uv run python -m hermes_trading.run
+# override the asset from goal.yaml:
+uv run python -m hermes_trading.run --asset ETH/USDT
 ```
 
 Polls every 10 s by default; configurable via `HERMES_POLL_SECONDS`.
-Persists open position and reflection counter across restarts.
+Persists open position (`state/position.json`) and reflection counter
+(`state/reflect_state.json`) across restarts.
+
+### Live paper worker — multi-asset (Issue #16)
+
+```bash
+uv run python -m hermes_trading.run --config state/live_multiasset.yaml
+```
+
+Reads `state/live_multiasset.yaml` (assets list, timeframe,
+`max_open_positions`, shared strategy yaml). Maintains one position
+per asset in `state/positions/<KEY>.json`, writes a portfolio-level
+heartbeat at `state/heartbeat.json`, and appends extended trade rows
+to `state/trades.jsonl` (asset, setup, entry_time / exit_time,
+return_pct, net_return_pct, position_size, holding_bars, …). Reflection
+is intentionally disabled in multi-asset mode.
+
+If `state/position.json` exists when multi-asset mode starts, it is
+migrated into the new per-asset layout once and the original is backed
+up as `state/position.json.bak.<UTC-iso>`.
+
+```bash
+# Verify both modes wire up correctly (no exchange / network required):
+uv run python scripts/test_multiasset_worker.py
+```
 
 ## Current best out-of-sample result
 
