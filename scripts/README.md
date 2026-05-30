@@ -20,6 +20,7 @@ worker's state files.
 | `run_eth_vs_btc_analysis.py` | Diagnostic comparison of ETH vs BTC SuperTrend results. Trade-level, trend-quality, market-structure metrics; two rotation selectors. Research-only, does not change the strategy. | #13 |
 | `run_hmm_regime.py` | Optional 2-state Gaussian HMM regime overlay on SuperTrend(10, 3), BTC and ETH separately. Per-fold fit + train-only state mapping. Requires `hmmlearn`; falls back cleanly with an install hint if missing. | #6 |
 | `run_top5_parallel.py` | Fixed-universe parallel portfolio of 5 SuperTrend(10, 3) instances (BTC, ETH, SOL, BNB, XRP). Equal risk per asset, up to 5 concurrent positions, no rotation. Optional per-asset HMM overlay; tests 4 variants. | #14 |
+| `run_funding_filter.py` | Funding-rate filter / sizing overlay. Loads BTC + ETH perpetuals funding from Binance Vision, forward-fills to 4h decision bars (causal), and blocks new longs when rolling 30-day funding percentile exceeds the threshold. 5 variants. | #7 |
 | `replay_live.py` | Replay mode — feed historical bars through the live engine at any speed. Educational / intuition-building tool. Does not trade, does not write to `state/`. | — |
 | `test_markov_regime.py` | Unit-style validators for the Markov module. Not an experiment. | — |
 

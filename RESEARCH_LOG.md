@@ -386,14 +386,69 @@ Side findings:
 
 See `research/top5_parallel_portfolio_report.md`.
 
+## Funding-rate filter (Issue #7)
+
+Three-phase research: (1) data audit, (2) diagnostics, (3) filter
+experiment. Binance Vision CDN hosts monthly funding archives (8h
+cadence) from 2020-01 onwards — fully covers the 48mo window.
+Forward-fill alignment to 4h decision bars; causal rolling 30-day
+percentile rank. Locked thresholds from spec: block at p95, half-size
+at p90.
+
+Phase 2 diagnostics — funding has essentially no linear predictive
+value at any tested horizon (correlation ≤ 0.03 against forward 4h /
+24h / 5d returns). Bucket analysis shows a U-shape: extreme negative
+*and* extreme positive funding both precede *higher* forward returns
+than the median bucket — the opposite of the "overheated = bad"
+filter hypothesis. Critically, SuperTrend entries rarely coincide
+with extreme funding (BTC: 0 of 39 trades in p95+; ETH: 2 of 35).
+SuperTrend enters near the start of trends; extreme funding marks
+late stages.
+
+48-month walk-forward, 20 folds:
+
+| variant | n | OOS return | max DD | PF | win % |
+|---|---:|---:|---:|---:|---:|
+| `eth_supertrend_baseline` | 30 | +37.86% | 5.30% | 2.92 | 63.3% |
+| `eth_supertrend_funding_filter` | 28 | +38.46% | 5.30% | 3.17 | 64.3% |
+| `btc_eth_parallel_baseline` | 65 | +39.72% | 5.54% | 2.50 | 53.8% |
+| `btc_eth_parallel_funding_filter` | 63 | +40.01% | **4.68%** | **2.57** | 54.0% |
+| `btc_eth_parallel_funding_sizing` | 63 | +39.28% | 4.68% | 2.55 | 54.0% |
+
+**Result: marginal pass.** `btc_eth_parallel_funding_filter` improves
+PF (+0.07) and DD (-15.5%) over the Issue #14 baseline. Only 2 of 65
+trades affected. The 2 blocked trades happened to be losers, so PF /
+DD ticked up — but with effect size this small, the result is
+plausibly sample noise. Phase 2 diagnostics correctly predicted this
+outcome.
+
+Adopted as **marginal research candidate** per the literal criterion
+("must improve PF or DD without destroying trade count"), with the
+explicit caveat that the improvement is within the fold-to-fold
+noise band. Not a primary strategy. Not wired into live trading.
+
+Filter and sizing modes gave identical results (same pattern as HMM
+Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
+
+See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
+and `funding_rate_data_audit.md`.
+
 ## Recommended next experiment
 
-**Funding-rate stress filter (Issue #7).** Per spec on top-5
-failure. Tests perpetuals funding rate as an exposure-gating signal
-— an orthogonal mechanism not tested in Issues #5–#14. Requires a
-new data adapter.
+**Live decay monitor.** Across Issues #5-#7 the pattern is clear:
+each new overlay produces smaller PF/DD improvements than the
+previous one. Funding's effect is roughly an order of magnitude
+smaller than HMM's. The infrastructure question (is the live
+strategy drifting?) is now more useful than continuing to test new
+mechanisms.
+
+Build a script that reads `state/trades.jsonl`, computes rolling
+PF / DD / win-rate on the last N trades, and flags when the live
+strategy decays below research-time expectations. Discussed
+earlier in chat as the highest-value cheap improvement.
 
 Queue per `ROADMAP.md`:
 
-1. Funding-rate stress filter (Issue #7)
+1. Live decay monitor
 2. Volatility-compression breakout (conditional)
+3. Stacking HMM + funding (formal redundancy test)

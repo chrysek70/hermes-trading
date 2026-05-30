@@ -60,6 +60,8 @@ tuning to make a variant cross the bar after the fact.
 | Top-5 parallel portfolio, no overlay (Issue #14) | 2.19 | +40.70% | not adopted: 155 trades and DD 2.49% (lowest of any experiment), but PF 2.19 fails the 2.24 gate by 0.05. XRP drag (-1.43%) plus SOL/BNB at slightly lower per-asset PF dilute the BTC/ETH edge. |
 | Top-5 parallel + HMM filter (Issue #14) | 2.49 | +26.74% | not adopted: PF/DD clear (2.49 / 1.86%) but return falls below the 38.66% gate (cut from +40.70% by HMM selectivity). |
 | **BTC/ETH parallel portfolio (Issue #14 reference, ADOPTED)** | **2.50** | **+39.72%** | **adopted as research candidate** — passes ALL five locked gates (trades 65, PF 2.50, DD 5.54%, return +39.72%, max single-asset share 51%). Strictly dominates the Issue #12 one-position multi-asset variant (more trades, much lower DD, equal PF). Same engine, no overlay — just drop the one-position constraint. |
+| BTC/ETH parallel + funding filter (Issue #7) | 2.57 | +40.01% | adopted as marginal research candidate — 63 trades, DD 4.68% (-15.5% vs baseline), PF +0.07. Improvement is real but small (only 2 of 65 trades affected). Phase 2 diagnostics showed SuperTrend entries rarely coincide with extreme-funding bars. Not a primary strategy. |
+| ETH SuperTrend + funding filter (Issue #7) | 3.17 | +38.46% | marginal pass — 28 trades, PF +0.25 vs ETH baseline, DD unchanged. Effect within fold noise. Not adopted as primary; informational only. |
 
 ## Rejected experiment patterns
 
@@ -76,18 +78,24 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **Funding-rate stress filter (Issue #7).** Promoted to top after
-   Issue #14. The top-5 parallel hypothesis was tested (Issue #14)
-   and the 5-asset universe failed PF gate by 0.05 (XRP drag +
-   SOL/BNB dilution). The BTC/ETH parallel reference passed and is
-   adopted, but does not bypass the need for orthogonal mechanism
-   testing. Funding rate tests perpetuals funding sign → exposure
-   gating. Requires a new data adapter.
+1. **Live decay monitor.** Promoted to top after Issue #7. Across
+   Issues #5-#7 the diminishing-returns pattern is clear: each new
+   overlay (RS, routing, HMM, funding) produces smaller PF / DD
+   improvements than the previous one, and most fail or barely pass
+   adoption gates. The infrastructure question is now more useful
+   than continuing to test mechanisms: build a script that reads
+   the live worker's `state/trades.jsonl`, computes rolling PF / DD /
+   win-rate on the last N trades, and alerts when the live strategy
+   drifts below research-time expectations. Discussed in chat
+   earlier; not yet built.
 
 2. **Volatility-compression breakout (conditional).** Hypothesis:
    only fire breakouts after a low-ATR-quartile compression.
    Phase-3 audit showed the `med-low` ATR bucket had PF 2.84.
-   Lower priority but on the queue.
+
+3. **Stacking HMM + funding** as a single experiment to formally
+   test redundancy. Lower priority — Issue #7 already strongly
+   suggests funding adds little beyond HMM.
 
 3. **Funding-rate stress filter.**
    Hypothesis: extreme perpetuals funding precedes squeezes; gate

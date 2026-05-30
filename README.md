@@ -226,6 +226,28 @@ lower DD (5.54% vs 9.61%), equal PF.
 adopted as research candidate. Live worker unchanged. See
 `research/top5_parallel_portfolio_report.md`.
 
+## Funding-rate filter (Issue #7)
+
+Three-phase research: data audit (Binance Vision funding archives
+from 2020-01 onwards, fully cover the 48mo window), diagnostics
+(funding has near-zero linear predictive value, U-shaped bucket
+pattern), and locked-spec filter test (block at p95 / half-size at
+p90).
+
+| variant | trades | OOS return | max DD | PF |
+|---|---:|---:|---:|---:|
+| `btc_eth_parallel_baseline` (reference) | 65 | +39.72% | 5.54% | 2.50 |
+| **`btc_eth_parallel_funding_filter`** | 63 | +40.01% | **4.68%** | **2.57** |
+| `btc_eth_parallel_funding_sizing` | 63 | +39.28% | 4.68% | 2.55 |
+| `eth_supertrend_funding_filter` | 28 | +38.46% | 5.30% | 3.17 |
+
+**Marginal pass — adopted as small research candidate, with caveat
+that the effect is within fold noise.** Only 2 of 65 trades affected
+by the filter (SuperTrend entries rarely coincide with extreme funding
+on this universe). PF and DD both improve marginally on the parallel
+portfolio. Not a primary strategy. See
+`research/funding_rate_filter_report.md`.
+
 ## Disclaimer
 
 This repository is **research code**. No part of it is financial advice,
