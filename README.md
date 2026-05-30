@@ -130,6 +130,26 @@ The v2 baseline degrades on extended history (PF 1.69 → 1.09), which
 is itself useful evidence that the original 24mo window was a
 favorable regime for the pullback/breakout setups.
 
+## BTC/ETH relative-strength context (Issue #5)
+
+ETH used as **market context only** (not traded). Same 48mo data, fees
+and fold geometry as above. RS windows fixed at conventional defaults
+(`lookback=30`, `ratio_ema=30`); no parameter sweeps.
+
+| variant | trades | OOS return | max DD | PF | Sharpe |
+|---|---:|---:|---:|---:|---:|
+| `supertrend_only` | 35 | +38.66% | 9.63% | 2.24 | 0.266 |
+| `supertrend_with_btc_eth_rs_filter` | 20 | +35.43% | **7.07%** | **3.33** | **0.384** |
+| `supertrend_with_btc_eth_rs_sizing` | 27 | +38.03% | **6.29%** | 3.01 | 0.338 |
+
+**Not adopted** — both RS variants beat supertrend_only on PF and DD
+(thesis materially supported: PF +34–49%, DD -27–35%) but neither
+clears the 30-trade discipline gate. The mechanism is validated;
+sample size is the blocker. The natural next experiment is the
+multi-asset extension (SuperTrend + RS applied to ETH as a traded
+asset on the same engine), which roughly doubles the sample. See
+`research/btc_eth_relative_strength_report.md`.
+
 ## Disclaimer
 
 This repository is **research code**. No part of it is financial advice,

@@ -155,15 +155,66 @@ the floor it appeared to be.
 
 See `research/supertrend_48mo_report.md`.
 
+## BTC/ETH relative-strength experiment (Issue #5)
+
+ETH used as **market context only** (not traded). Fixed conventional
+windows: `lookback=30`, `ratio_ema=30`, `min_btc_minus_eth_return=0.0`,
+`require_ratio_above_ema=true`. Same 48mo data, fees, fold geometry as
+Issue #11. RS features are causal (close[i]/close[i-30], EMA recursive
+on past). RS decisions computed once on the full aligned index then
+sliced per fold — OOS-safe because no parameter is fit on train.
+
+Two RS overlay modes:
+
+- **filter**: long entries blocked unless BTC stronger than ETH **and**
+  BTC/ETH ratio above its EMA30.
+- **sizing**: keep all entries but scale size 1.0 (both gates pass) /
+  0.5 (one passes) / 0.0 (neither passes — effectively blocked).
+
+48-month walk-forward, 20 folds:
+
+| variant | n | OOS return | max DD | PF | Sharpe | win % |
+|---|---:|---:|---:|---:|---:|---:|
+| `supertrend_only` | 35 | +38.66% | 9.63% | 2.24 | 0.266 | 45.7% |
+| `supertrend_with_btc_eth_rs_filter` | 20 | +35.43% | **7.07%** | **3.33** | **0.384** | **55.0%** |
+| `supertrend_with_btc_eth_rs_sizing` | 27 | +38.03% | **6.29%** | 3.01 | 0.338 | 48.1% |
+
+**Result: NOT ADOPTED — fails the 30-trade discipline gate.**
+
+The RS thesis is materially supported by the data: PF lifts +49% /
++34% and max DD drops -27% / -35% across the two modes. Win rate climbs
++9pp (filter) / +2pp (sizing). The 8 SuperTrend signals that would have
+fired in `rs_weak` (neither gate passing) are exactly the ones the
+overlay blocks — consistent with the thesis that BTC flips without
+crypto-wide confirmation are lower-quality. Sizing mode is the gentler
+and more informationally honest implementation (continuous, not binary)
+and achieves the lowest DD of any SuperTrend variant in this repo.
+
+The blocker is sample size: filter mode drops to 20 trades, sizing to
+27. Project-wide discipline says ≥30 OOS trades, no exceptions for
+high-PF subsets. This is the same gate that correctly rejected
+SuperTrend on 24mo (9 trades) and SuperTrend+routing on 48mo (20
+trades). Adopting here would break that consistency.
+
+**Recommended next step (deviates from strict spec):** rather than
+jumping to Issue #6 (HMM), the cleaner next experiment is a multi-asset
+extension applying the SuperTrend + RS framework to ETH as a traded
+asset on the same engine. That roughly doubles the trade count and
+directly resolves the count-gate question this experiment leaves open.
+HMM remains queued behind that.
+
+See `research/btc_eth_relative_strength_report.md`.
+
 ## Recommended next experiment
 
-**BTC/ETH relative-strength rotation (Issue #5).** Independent benefit
-(cross-asset signal) plus a clean way to double the SuperTrend trade
-count, which is the path to validating the routing overlay (which
-passed PF but failed the trade-count gate on 48mo BTC alone).
+**Multi-asset SuperTrend + RS (BTC and ETH combined).** Direct
+follow-up to Issue #5's near-miss. Same code, ETH added as a traded
+asset. Doubles sample at zero parameter cost — the right way to test
+whether the 49% PF lift / 35% DD cut from RS holds on a sample large
+enough to clear the discipline gate.
 
 Queue per `ROADMAP.md`:
 
-1. BTC/ETH relative-strength rotation
-2. HMM 2-state regime overlay (optional `hmmlearn` dep)
+1. Multi-asset SuperTrend + RS (BTC and ETH)
+2. HMM 2-state regime overlay (Issue #6)
 3. Funding-rate stress filter

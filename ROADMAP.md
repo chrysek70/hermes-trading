@@ -50,6 +50,8 @@ tuning to make a variant cross the bar after the fact.
 | **SuperTrend(10, 3) on 48mo (Issue #11)** | **2.24** | **+38.66%** | **adopted as research candidate**: 35 OOS trades, max DD 9.63%, 10/20 folds positive — first variant since v2 to clear both gates. Same code, no parameter changes. Live worker NOT modified. See `research/supertrend_48mo_report.md`. |
 | SuperTrend + strategy_routing (48mo) | 3.16 | +29.56% | not adopted: best risk profile (DD 5.95%, win 50.0%, Sharpe 0.337) but 20 trades — fails count gate. Tracked as a candidate sizing overlay for after BTC/ETH (Issue #5). |
 | v2 baseline on 48mo (sanity ref) | 1.09 | +3.28% | reference only — baseline degrades materially on extended window (PF 1.69 → 1.09), indicating the original 24mo window was favorable for v2 setups. |
+| **SuperTrend + BTC/ETH RS filter (Issue #5)** | **3.33** | **+35.43%** | not adopted: PF beats supertrend_only by 49% and DD drops 9.63% → 7.07%, but trade count falls to 20 — fails the 30-trade discipline gate. RS mechanism is validated; sample-blocked. |
+| SuperTrend + BTC/ETH RS sizing (Issue #5) | 3.01 | +38.03% | not adopted: best DD of any SuperTrend variant (6.29%) and 27 trades — closest variant yet to clearing the gate, still 3 short. Same mechanism as filter; gentler implementation. |
 
 ## Rejected experiment patterns
 
@@ -66,16 +68,18 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **BTC/ETH relative-strength rotation. (Now top of queue — Issue #5.)**
-   Hypothesis: cross-asset relative strength gates entry direction;
-   doubles sample by adding ETH on the same engine. Also doubles the
-   newly-adopted SuperTrend trade count by giving it a second asset
-   to fire on, which is the cleanest way to confirm the routing
-   overlay (which passed PF but failed the trade-count gate at 48mo).
+1. **Multi-asset extension: SuperTrend + RS on BTC and ETH combined.**
+   Direct follow-up to Issue #5's near-miss: RS filter/sizing variants
+   both cleared the PF and DD criteria but fell short of the 30-trade
+   gate (20 / 27 trades vs 35). Adding ETH as a traded asset on the
+   same engine roughly doubles the sample. This is the cleanest way to
+   resolve the count-gate question Issue #5 leaves open. NOT a parameter
+   tune of either SuperTrend or the RS config.
 
-2. **HMM 2-state regime overlay (optional `hmmlearn` dep).**
+2. **HMM 2-state regime overlay (optional `hmmlearn` dep) — Issue #6.**
    Hypothesis: latent states found by EM are cleaner than the hand-defined
    6-state Markov alphabet; soft probabilities feed exposure scaling.
+   Orthogonal to RS — does not benefit from the multi-asset extension.
 
 3. **Funding-rate stress filter.**
    Hypothesis: extreme perpetuals funding precedes squeezes; gate

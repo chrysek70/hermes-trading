@@ -1,0 +1,60 @@
+# SuperTrend(10, 3) + BTC/ETH relative-strength context — single setup,
+# long-only. Same entry/exit machinery as `strategy_supertrend.yaml`; the
+# only difference is the `relative_strength` block which the experiment
+# runner consumes to build a decisions DataFrame (filter or sizing mode).
+#
+# Spec from issue #5. Hard rules locked at experiment start:
+#   - RS windows are fixed conventional values; NOT tuned.
+#   - Walk-forward OOS only.
+#   - Adopt only if OOS PF > 2.24 (beat supertrend_only) AND trades >= 30,
+#     OR meaningfully reduce max DD while keeping PF > 2.24 and >= 30 trades.
+
+version: "v3-supertrend-rs-01"
+schema: "v2-long-short-supertrend"
+rsi_period: 14
+
+regime:
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+
+setups:
+  pullback:
+    enabled: false
+    rsi_threshold: 32
+    pullback_ema: 21
+    ema_tol: 0.002
+    exit:
+      type: mean_revert
+      target_rsi: 55
+      stop_atr_mult: 1.2
+  breakout:
+    enabled: false
+    require_above_vwap: true
+    ignition_atr_mult: 1.0
+    exit:
+      type: trail
+      trail_ema: 21
+      stop_atr_mult: 1.5
+  supertrend:
+    enabled: true
+    period: 10
+    multiplier: 3.0
+    max_holding_bars: 0
+
+shorts:
+  enabled: false
+
+risk:
+  atr_period: 14
+  position_size_r: 0.5
+  max_hold_bars: 240
+  regime_flip_exit: false
+
+relative_strength:
+  enabled: true
+  asset: ETH/USDT
+  timeframe: 4h
+  lookback_bars: 30
+  ratio_ema: 30
+  min_btc_minus_eth_return: 0.0
+  require_ratio_above_ema: true
