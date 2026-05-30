@@ -1,0 +1,74 @@
+# Markov config for the Donchian experiment — same state alphabet and
+# thresholds as state/markov_regime.yaml; the only thing that differs is the
+# strategy_routing.routes table which permits `donchian_breakout` in up_* states.
+
+enabled: false              # walk_forward forces enabled via the config we pass
+mode: strategy_routing
+
+model:
+  type: discrete_markov
+  order: 1
+  smoothing_alpha: 1.0
+
+state:
+  method: hysteresis_discrete
+  return_window: 12
+  vol_window: 14
+  up_return_threshold: 0.003
+  down_return_threshold: -0.003
+  high_vol_threshold: 0.008
+  hysteresis_bars: 3
+
+sizing:
+  min_score: 0.25
+  max_score: 1.00
+  neutral_score: 1.00
+  favorable_states:
+    - up_low_vol
+    - up_high_vol
+    - sideways_low_vol
+  unfavorable_states:
+    - down_high_vol
+  current_state_weight: 0.30
+  transition_weight: 0.70
+
+# Routes mirror the proven strategy_routing config but list `donchian_breakout`
+# in up_* states so the Markov gate doesn't block the new setup.
+strategy_routing:
+  enabled: true
+  routes:
+    up_low_vol:
+      allowed_setups: [donchian_breakout, breakout]
+      size_multiplier: 1.00
+    up_high_vol:
+      allowed_setups: [donchian_breakout, breakout]
+      size_multiplier: 0.75
+    sideways_low_vol:
+      allowed_setups: [pullback]
+      size_multiplier: 0.50
+    sideways_high_vol:
+      allowed_setups: []
+      size_multiplier: 0.00
+    down_low_vol:
+      allowed_setups: []
+      size_multiplier: 0.00
+    down_high_vol:
+      allowed_setups: []
+      size_multiplier: 0.00
+
+multi_timeframe:
+  enabled: false             # known false-positive interactions (see code review); off for this experiment
+
+validation:
+  walk_forward_only: true
+  embargo_bars: 6
+
+# Legacy v1 keys kept for the live worker's (currently dormant) markov path.
+allowed_long_states:
+  - up_low_vol
+  - up_high_vol
+  - sideways_low_vol
+min_prob_same_or_up: 0.55
+
+lookback_bars: 200
+min_training_bars: 500

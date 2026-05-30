@@ -34,6 +34,7 @@ def _snapshot_entry(row: dict, ts) -> dict:
     keys = (
         "rsi", "ema_fast", "ema_slow", "ema_pull", "atr", "vwap",
         "ema_slope", "atr_pct", "vwap_distance_pct", "volume_zscore",
+        "donchian_high", "donchian_low", "donchian_mid",
         "markov_state", "markov_stable_state", "markov_regime_score",
         "markov_size_multiplier", "markov_allowed_setups",
     )
@@ -103,6 +104,25 @@ def _run_state_machine(records: list[dict], strategy: dict, warmup: int, fee: fl
         ):
             trade[k] = position.get(k)
         trade["entry_price"] = position["entry"]
+        # Donchian-specific derived diagnostics
+        dh = position.get("entry_donchian_high")
+        if dh is not None and isinstance(dh, (int, float)) and not pd.isna(dh) and dh > 0:
+            trade["donchian_breakout_distance_pct"] = (position["entry"] - float(dh)) / float(dh)
+        else:
+            trade["donchian_breakout_distance_pct"] = None
+        init_stop = position.get("initial_stop")
+        if init_stop is not None and position["entry"] > 0:
+            trade["atr_stop_distance_pct"] = (position["entry"] - float(init_stop)) / position["entry"]
+        else:
+            trade["atr_stop_distance_pct"] = None
+        # markov_route — flattened allowed_setups for human reading
+        mas = position.get("markov_allowed_setups")
+        if isinstance(mas, list):
+            trade["markov_route"] = ",".join(mas) if mas else "(none)"
+        elif mas is None:
+            trade["markov_route"] = "(no markov)"
+        else:
+            trade["markov_route"] = str(mas)
         trades.append(trade)
 
     for i, row in enumerate(records):
@@ -128,12 +148,14 @@ def _run_state_machine(records: list[dict], strategy: dict, warmup: int, fee: fl
             if long_ok and size_mult > 0.0:
                 setup_l = signals.long_entry(row, strategy)
                 if setup_l and (allowed_setups is None or setup_l in allowed_setups):
+                    init_stop = signals.initial_stop(row, setup_l, strategy)
                     position = {
                         "entry": row["close"] * (1 + slippage),
                         "setup": setup_l,
                         "direction": "long",
                         "i": i,
-                        "stop": signals.initial_stop(row, setup_l, strategy),
+                        "stop": init_stop,
+                        "initial_stop": init_stop,
                         "size_multiplier": size_mult,
                         "markov_state": row.get("markov_state"),
                         "markov_stable_state": row.get("markov_stable_state"),
@@ -301,8 +323,10 @@ def write_trades_detailed_csv(trades: list[dict], path: str) -> None:
         "entry_atr", "entry_vwap",
         "entry_ema_slope", "entry_atr_pct", "entry_vwap_distance_pct",
         "entry_volume_zscore",
+        "entry_donchian_high", "entry_donchian_low", "entry_donchian_mid",
+        "donchian_breakout_distance_pct", "atr_stop_distance_pct",
         "markov_state", "markov_stable_state", "markov_regime_score",
-        "markov_size_multiplier", "markov_allowed_setups",
+        "markov_size_multiplier", "markov_allowed_setups", "markov_route",
         "position_size_effective", "size_multiplier",
     ]
     with open(path, "w", newline="") as fh:

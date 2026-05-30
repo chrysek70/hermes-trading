@@ -71,6 +71,20 @@ def three_bar_play(df: pd.DataFrame, ignition_atr_mult: float = 1.0) -> pd.Serie
     return (ignition & inside & trigger).fillna(False)
 
 
+def donchian_channels(df: pd.DataFrame, period: int = 20) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Donchian channels using PRIOR completed bars only — causal.
+
+    At row i, ``donchian_high`` is ``max(high[i-period .. i-1])`` (shifted by 1
+    so the current bar's high never participates). Comparing today's close
+    against today's donchian_high is therefore lookahead-safe — the channel
+    you're breaking out *of* was finalised yesterday.
+    """
+    high = df["high"].rolling(period).max().shift(1)
+    low = df["low"].rolling(period).min().shift(1)
+    mid = (high + low) / 2.0
+    return high, low, mid
+
+
 def compute_indicators(df: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     """Return a copy of ``df`` with all indicator columns the strategy needs."""
     regime = strategy["regime"]
@@ -88,6 +102,9 @@ def compute_indicators(df: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     out["three_bar_short"] = three_bar_play_short(
         out, float(strategy.get("shorts", {}).get("breakout", {}).get("ignition_atr_mult", 1.0))
     )
+    # Donchian channels — only computed if the donchian setup is wired in.
+    donch_period = int(strategy.get("setups", {}).get("donchian", {}).get("period", 20))
+    out["donchian_high"], out["donchian_low"], out["donchian_mid"] = donchian_channels(out, donch_period)
     return out
 
 
@@ -101,11 +118,31 @@ def _bullish_regime(row: pd.Series) -> bool:
 
 
 def long_entry(row: pd.Series, strategy: dict) -> str | None:
-    """Return the setup name that fires a long here, or None. Regime-gated."""
+    """Return the setup name that fires a long here, or None. Regime-gated.
+
+    Check order: donchian_breakout → pullback → breakout. Donchian takes
+    priority when both donchian and breakout conditions fire on the same bar,
+    because the Donchian experiment is the one being measured.
+    """
     if not _bullish_regime(row):
         return None  # never trade against the 50/200 trend
 
     setups = strategy["setups"]
+
+    # Donchian-20 trend-following breakout (uses prior-window high — causal)
+    donch = setups.get("donchian", {})
+    if donch.get("enabled", False):
+        dh = row.get("donchian_high")
+        if pd.notna(dh) and row["close"] > float(dh):
+            max_neg_vwap = float(donch.get("max_negative_vwap_distance_pct", -0.015))
+            vwap_val = row.get("vwap")
+            if pd.notna(vwap_val) and float(vwap_val) > 0:
+                vwap_dist = (row["close"] - float(vwap_val)) / float(vwap_val)
+                vwap_ok = vwap_dist >= max_neg_vwap
+            else:
+                vwap_ok = False
+            if vwap_ok:
+                return "donchian_breakout"
 
     pull = setups["pullback"]
     if pull.get("enabled", True):
@@ -124,7 +161,11 @@ def long_entry(row: pd.Series, strategy: dict) -> str | None:
 
 
 def initial_stop(row: pd.Series, setup: str, strategy: dict) -> float:
-    mult = float(strategy["setups"][setup]["exit"].get("stop_atr_mult", 1.5))
+    if setup == "donchian_breakout":
+        cfg = strategy["setups"]["donchian"]
+        mult = float(cfg.get("atr_stop_mult", 2.5))
+    else:
+        mult = float(strategy["setups"][setup]["exit"].get("stop_atr_mult", 1.5))
     return float(row["close"] - mult * row["atr"])
 
 
@@ -211,6 +252,32 @@ def short_exit(row: pd.Series, position: dict, strategy: dict, bars_held: int) -
 def long_exit(row: pd.Series, position: dict, strategy: dict, bars_held: int) -> str | None:
     """Return an exit reason or None. Mutates position['stop'] for trailing."""
     risk = strategy["risk"]
+
+    # Donchian setup: distinct exit ladder — ATR trail + midline + bad-state + time stop.
+    # Note: the EMA50/200 regime-flip exit is INTENTIONALLY skipped here; the
+    # bad_markov_state check replaces it with a return-based filter that is
+    # less noisy on 4h BTC (per Phase-3 finding).
+    if position["setup"] == "donchian_breakout":
+        donch_cfg = strategy["setups"]["donchian"]
+        trail_mult = float(donch_cfg.get("atr_trail_mult", 3.0))
+        if pd.notna(row.get("atr")):
+            trail_level = float(row["close"]) - trail_mult * float(row["atr"])
+            if trail_level > position["stop"]:
+                position["stop"] = trail_level
+        if row["low"] <= position["stop"]:
+            return "stop"
+        if donch_cfg.get("exit_on_midline_break", True):
+            mid = row.get("donchian_mid")
+            if pd.notna(mid) and row["close"] < float(mid):
+                return "midline_break"
+        if donch_cfg.get("exit_on_bad_markov_state", True):
+            ss = row.get("markov_stable_state")
+            if ss in ("down_low_vol", "down_high_vol"):
+                return "bad_markov_state"
+        max_hold = int(donch_cfg.get("max_holding_bars", 96))
+        if max_hold > 0 and bars_held >= max_hold:
+            return "donchian_time_stop"
+        return None
 
     # Global hard stop (intrabar low pierces the stop).
     if row["low"] <= position["stop"]:

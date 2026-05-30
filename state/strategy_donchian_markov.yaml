@@ -1,0 +1,58 @@
+# Phase-7+1 experiment — Donchian-20 trend-following breakout, optionally
+# paired with the existing Markov strategy_routing filter. NOT live; goes
+# through walk_forward.walk_forward only.
+#
+# Phase-3 findings that motivate the specific choices below:
+#   - RSI<32 pullback was the worst setup (PF 0.39, 0/6 deep-oversold) → disabled
+#   - vwap_distance_pct < -1.5% went 0/15 → max_negative_vwap_distance_pct
+#   - 21-EMA trail on breakouts was PF 0.08 → Donchian uses an ATR trail instead
+#   - Holding past 16 bars produced PF 15.84 → max_holding_bars=96 (4 days at 4h)
+#
+# Two hyperparameters only (period, atr multipliers) — no per-state tuning,
+# no per-fold tuning. Adopt only if walk-forward OOS PF > 2.17 and trades ≥ 30.
+
+version: "v3-donchian-01"
+schema: "v2-long-short-donchian"
+rsi_period: 14
+
+regime:
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+
+setups:
+  pullback:
+    enabled: false           # Phase-3: PF 0.39 — drop entirely from this experiment
+    rsi_threshold: 32
+    pullback_ema: 21
+    ema_tol: 0.002
+    exit:
+      type: mean_revert
+      target_rsi: 55
+      stop_atr_mult: 1.2
+  breakout:
+    enabled: true            # keep 3-bar play active so combined trade count stays meaningful
+    require_above_vwap: true
+    ignition_atr_mult: 1.0
+    exit:
+      type: trail
+      trail_ema: 21
+      stop_atr_mult: 1.5
+  donchian:
+    enabled: true
+    period: 20
+    require_ema_trend: true
+    max_negative_vwap_distance_pct: -0.015   # -1.5% (Phase-3 evidence-driven)
+    atr_stop_mult: 2.5                       # wider stop than current 1.5×
+    atr_trail_mult: 3.0                      # generous trail to let trends run
+    max_holding_bars: 96                     # ~16 days at 4h (where the OOS edge lives)
+    exit_on_midline_break: true              # close below (high+low)/2 of prior window
+    exit_on_bad_markov_state: true           # close trade when classifier flips down_*
+
+shorts:
+  enabled: false             # this experiment isolates the LONG Donchian thesis
+
+risk:
+  atr_period: 14
+  position_size_r: 0.5
+  max_hold_bars: 240         # global ceiling; Donchian's own 96-bar cap will hit first
+  regime_flip_exit: true     # still applies to pullback/breakout; donchian skips this gate
