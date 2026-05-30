@@ -19,8 +19,7 @@ state/reflect_state.json
 
 # Large regenerable market data and detailed trade CSVs
 state/data/
-results/trades_detailed_*.csv
-results/trades_donchian_detailed_*.csv
+results/trades_*.csv
 
 # Research scratch
 research/github_refs/

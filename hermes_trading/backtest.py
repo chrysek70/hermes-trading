@@ -35,6 +35,7 @@ def _snapshot_entry(row: dict, ts) -> dict:
         "rsi", "ema_fast", "ema_slow", "ema_pull", "atr", "vwap",
         "ema_slope", "atr_pct", "vwap_distance_pct", "volume_zscore",
         "donchian_high", "donchian_low", "donchian_mid",
+        "supertrend_line", "supertrend_direction",
         "markov_state", "markov_stable_state", "markov_regime_score",
         "markov_size_multiplier", "markov_allowed_setups",
     )

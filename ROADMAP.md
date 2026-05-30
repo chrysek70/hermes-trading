@@ -45,6 +45,8 @@ tuning to make a variant cross the bar after the fact.
 | Regime-based HODL sizing | — | -44% to +9% | rejected: every variant underperformed naive HODL |
 | Donchian-20 trend-following | 0.90 | -2.16% | rejected: trend mechanism partial (16+ bars: PF 15.84) but short-holds destroy it |
 | Donchian + strategy_routing | 0.84 | -2.97% | rejected: routing slightly hurt Donchian |
+| SuperTrend(10, 3) trend-following | 9.02 | +13.00% | **not adopted**: only 9 OOS trades — fails trade-count gate (≥30) despite passing PF gate by ~5×. Promising under-sampled. See `research/supertrend_report.md`. |
+| SuperTrend + strategy_routing | 34.54 | +2.47% | rejected: routing cut signal further (9 → 4 trades); PF inflated by tiny sample |
 
 ## Rejected experiment patterns
 
@@ -61,14 +63,17 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **SuperTrend(10, 3) trend-following.**
-   Hypothesis: ATR-based directional flips fire less often than Donchian-20
-   in chop and capture the same trend-continuation bucket. Two
-   hyperparameters, both TA-conventional defaults.
+1. **SuperTrend on extended history (48mo).**
+   Follow-up to the under-sampled SuperTrend(10, 3) result above. Same
+   parameters, same code, more data. NOT a parameter tune — the standard
+   way to test whether a 9-trade signal generalises. Adopt only if PF
+   stays above baseline AND trade count crosses the 30-trade gate.
 
 2. **BTC/ETH relative-strength rotation.**
    Hypothesis: cross-asset relative strength gates entry direction;
-   doubles sample by adding ETH on the same engine.
+   doubles sample by adding ETH on the same engine. Also implicitly
+   doubles the SuperTrend trade count by giving it a second asset to
+   fire on.
 
 3. **HMM 2-state regime overlay (optional `hmmlearn` dep).**
    Hypothesis: latent states found by EM are cleaner than the hand-defined

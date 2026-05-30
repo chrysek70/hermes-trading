@@ -1,0 +1,52 @@
+# SuperTrend(10, 3) trend-following — single setup, long-only.
+#
+# Spec from issue #4. Hard rules locked at experiment start:
+#   - Hyperparameters (10, 3) are TA-conventional defaults; NOT tuned.
+#   - Walk-forward OOS only.
+#   - Adopt only if OOS PF > 1.69 AND OOS trade count >= 30.
+#   - If the experiment fails, close it and move to the next ROADMAP item;
+#     do NOT iterate on the parameters.
+
+version: "v3-supertrend-01"
+schema: "v2-long-short-supertrend"
+rsi_period: 14
+
+# EMA50/200 regime gate stays — same convention as v2_long_short. The
+# SuperTrend entry only fires inside the bullish-regime gate, matching
+# the broader strategy framework.
+regime:
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+
+setups:
+  pullback:
+    enabled: false
+    rsi_threshold: 32
+    pullback_ema: 21
+    ema_tol: 0.002
+    exit:
+      type: mean_revert
+      target_rsi: 55
+      stop_atr_mult: 1.2
+  breakout:
+    enabled: false
+    require_above_vwap: true
+    ignition_atr_mult: 1.0
+    exit:
+      type: trail
+      trail_ema: 21
+      stop_atr_mult: 1.5
+  supertrend:
+    enabled: true
+    period: 10
+    multiplier: 3.0
+    max_holding_bars: 0     # 0 = let the indicator's flip do the work
+
+shorts:
+  enabled: false
+
+risk:
+  atr_period: 14
+  position_size_r: 0.5
+  max_hold_bars: 240
+  regime_flip_exit: false   # SuperTrend handles its own regime via the flip; avoid double exit

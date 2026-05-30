@@ -95,16 +95,39 @@ chop relative to confluence-triggered setups.
 
 Per the hard rule "do not tune endlessly", this experiment is closed.
 
+## SuperTrend(10, 3) trend-following experiment
+
+Same trend-capture thesis as Donchian, more selective entry trigger
+(ATR-banded directional flips, not channel-max touches). Long-only,
+EMA50/200 regime-gated, single setup, no parameter tuning.
+
+| variant | OOS PF | OOS return | trades | verdict |
+|---|---:|---:|---:|---|
+| supertrend_only | 9.02 | +13.00% | 9 | **not adopted** — trade-count gate (≥30) failed despite PF passing by ~5× |
+| supertrend + strategy_routing | 34.54 | +2.47% | 4 | rejected — routing cut signal in half, PF inflated by tiny sample |
+
+Headline data points: 77.8% win rate, 1.49% max DD (lowest of any
+experiment), 4 of 8 folds positive vs baseline's 3, no fold reported
+a >1.17% drawdown. The trend-capture mechanism Donchian failed to
+realise (Phase 3's "16+ bars → PF 15.84" finding) appears to be
+working here, but the signal fires roughly 4–5 times per year on 4h
+BTC — too rare to confirm at 24-month horizon.
+
+Per the locked criteria: not adopted. The result is "promising
+under-sampled signal", not "working strategy". See
+`research/supertrend_report.md`.
+
 ## Recommended next experiment
 
-**SuperTrend(10, 3) trend-following.** Same trend-capture thesis as
-Donchian but a more selective entry (ATR-based directional flips,
-fewer false breakouts in chop). Two TA-conventional hyperparameters,
-low overfit surface, same walk-forward harness and adoption criteria.
+**Re-run SuperTrend(10, 3) on extended history (48 months).** Same
+parameters, same code. This is the standard way to test whether a
+9-trade signal generalises — not a parameter tune. If extended-history
+PF stays above baseline AND trade count crosses the 30 gate, adopt
+SuperTrend. If either fails, close and move to BTC/ETH RS rotation.
 
-If SuperTrend fails the criteria, the queue continues per `ROADMAP.md`:
+Queue per `ROADMAP.md`:
 
-1. SuperTrend(10, 3)
+1. SuperTrend on extended history (48mo)
 2. BTC/ETH relative-strength rotation
 3. HMM 2-state regime overlay (optional `hmmlearn` dep)
 4. Funding-rate stress filter

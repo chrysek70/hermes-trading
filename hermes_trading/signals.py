@@ -71,6 +71,67 @@ def three_bar_play(df: pd.DataFrame, ignition_atr_mult: float = 1.0) -> pd.Serie
     return (ignition & inside & trigger).fillna(False)
 
 
+def supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> tuple[pd.Series, pd.Series]:
+    """SuperTrend indicator — causal.
+
+    Returns (line, direction) where direction is +1 for uptrend, -1 for
+    downtrend. At bar i the line and direction are determined from the
+    close at i and the *prior bar's* finalised bands — no lookahead.
+    Entry decisions should compare current direction against the
+    ``direction.shift(1)`` to identify flip bars.
+    """
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    hl2 = (high + low) / 2.0
+
+    # Wilder ATR (same convention as signals.atr)
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr_ = tr.ewm(alpha=1.0 / period, adjust=False).mean()
+
+    basic_upper = (hl2 + multiplier * atr_).to_numpy()
+    basic_lower = (hl2 - multiplier * atr_).to_numpy()
+    closes = close.to_numpy()
+    n = len(df)
+
+    final_upper = np.full(n, np.nan)
+    final_lower = np.full(n, np.nan)
+    direction = np.zeros(n, dtype=np.int8)
+    line = np.full(n, np.nan)
+
+    if n == 0:
+        return pd.Series(line, index=df.index), pd.Series(direction, index=df.index, dtype=np.int8)
+
+    final_upper[0] = basic_upper[0]
+    final_lower[0] = basic_lower[0]
+    direction[0] = 1
+    line[0] = basic_lower[0]
+
+    for i in range(1, n):
+        # final_upper ratchets DOWN unless the prior close pierced it
+        if basic_upper[i] < final_upper[i - 1] or closes[i - 1] > final_upper[i - 1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i - 1]
+        # final_lower ratchets UP unless the prior close broke it
+        if basic_lower[i] > final_lower[i - 1] or closes[i - 1] < final_lower[i - 1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i - 1]
+        # direction is set by close vs PRIOR bar's finalised bands
+        if closes[i] > final_upper[i - 1]:
+            direction[i] = 1
+        elif closes[i] < final_lower[i - 1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i - 1]
+        # the line is the band on the opposite side of the trend
+        line[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
+
+    return pd.Series(line, index=df.index), pd.Series(direction, index=df.index, dtype=np.int8)
+
+
 def donchian_channels(df: pd.DataFrame, period: int = 20) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Donchian channels using PRIOR completed bars only — causal.
 
@@ -105,6 +166,12 @@ def compute_indicators(df: pd.DataFrame, strategy: dict) -> pd.DataFrame:
     # Donchian channels — only computed if the donchian setup is wired in.
     donch_period = int(strategy.get("setups", {}).get("donchian", {}).get("period", 20))
     out["donchian_high"], out["donchian_low"], out["donchian_mid"] = donchian_channels(out, donch_period)
+    # SuperTrend — only computed if the supertrend setup is wired in.
+    st_cfg = strategy.get("setups", {}).get("supertrend", {})
+    st_period = int(st_cfg.get("period", 10))
+    st_mult = float(st_cfg.get("multiplier", 3.0))
+    out["supertrend_line"], out["supertrend_direction"] = supertrend(out, st_period, st_mult)
+    out["supertrend_direction_prev"] = out["supertrend_direction"].shift(1)
     return out
 
 
@@ -128,6 +195,17 @@ def long_entry(row: pd.Series, strategy: dict) -> str | None:
         return None  # never trade against the 50/200 trend
 
     setups = strategy["setups"]
+
+    # SuperTrend trend-following — fires only on bullish direction FLIPS
+    # (prior bar was -1, current bar is +1). This avoids re-entering every
+    # bar of a sustained uptrend.
+    st = setups.get("supertrend", {})
+    if st.get("enabled", False):
+        cur = row.get("supertrend_direction")
+        prev = row.get("supertrend_direction_prev")
+        if pd.notna(cur) and pd.notna(prev):
+            if int(cur) == 1 and int(prev) == -1:
+                return "supertrend"
 
     # Donchian-20 trend-following breakout (uses prior-window high — causal)
     donch = setups.get("donchian", {})
@@ -161,6 +239,14 @@ def long_entry(row: pd.Series, strategy: dict) -> str | None:
 
 
 def initial_stop(row: pd.Series, setup: str, strategy: dict) -> float:
+    if setup == "supertrend":
+        # The SuperTrend line IS the dynamic stop. At entry that level is the
+        # current band on the opposite side of the trend.
+        line = row.get("supertrend_line")
+        if pd.notna(line):
+            return float(line)
+        # Fall back to a wide ATR stop if the line is somehow NaN at entry.
+        return float(row["close"] - 3.0 * row["atr"])
     if setup == "donchian_breakout":
         cfg = strategy["setups"]["donchian"]
         mult = float(cfg.get("atr_stop_mult", 2.5))
@@ -252,6 +338,25 @@ def short_exit(row: pd.Series, position: dict, strategy: dict, bars_held: int) -
 def long_exit(row: pd.Series, position: dict, strategy: dict, bars_held: int) -> str | None:
     """Return an exit reason or None. Mutates position['stop'] for trailing."""
     risk = strategy["risk"]
+
+    # SuperTrend setup: the indicator itself is the exit. Exit on bearish
+    # flip; the SuperTrend line ratchets the stop as the trend extends.
+    if position["setup"] == "supertrend":
+        st_cfg = strategy["setups"]["supertrend"]
+        line = row.get("supertrend_line")
+        if pd.notna(line):
+            line_val = float(line)
+            if line_val > position["stop"]:
+                position["stop"] = line_val
+        if row["low"] <= position["stop"]:
+            return "stop"
+        cur = row.get("supertrend_direction")
+        if pd.notna(cur) and int(cur) == -1:
+            return "supertrend_flip"
+        max_hold = int(st_cfg.get("max_holding_bars", 0) or 0)
+        if max_hold > 0 and bars_held >= max_hold:
+            return "supertrend_time_stop"
+        return None
 
     # Donchian setup: distinct exit ladder — ATR trail + midline + bad-state + time stop.
     # Note: the EMA50/200 regime-flip exit is INTENTIONALLY skipped here; the
