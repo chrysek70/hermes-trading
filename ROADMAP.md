@@ -78,16 +78,13 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **Live decay monitor.** Promoted to top after Issue #7. Across
-   Issues #5-#7 the diminishing-returns pattern is clear: each new
-   overlay (RS, routing, HMM, funding) produces smaller PF / DD
-   improvements than the previous one, and most fail or barely pass
-   adoption gates. The infrastructure question is now more useful
-   than continuing to test mechanisms: build a script that reads
-   the live worker's `state/trades.jsonl`, computes rolling PF / DD /
-   win-rate on the last N trades, and alerts when the live strategy
-   drifts below research-time expectations. Discussed in chat
-   earlier; not yet built.
+1. **Live decay monitor — SHIPPED (Issue #15).** `scripts/monitor_strategy_decay.py`
+   reads `state/trades.jsonl`, computes rolling PF / DD / win-rate /
+   consecutive-losses over configurable windows (default 10/25/50),
+   compares to research-time baselines, and exits 1 on `DEGRADED`.
+   Monitor-only — never modifies trading decisions. No cron wiring,
+   no Slack / Datadog integration (deliberate; both are easy to add
+   later via exit code or JSON output). See `research/decay_monitor_report.md`.
 
 2. **Volatility-compression breakout (conditional).** Hypothesis:
    only fire breakouts after a low-ATR-quartile compression.

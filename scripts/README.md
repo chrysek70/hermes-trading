@@ -21,6 +21,7 @@ worker's state files.
 | `run_hmm_regime.py` | Optional 2-state Gaussian HMM regime overlay on SuperTrend(10, 3), BTC and ETH separately. Per-fold fit + train-only state mapping. Requires `hmmlearn`; falls back cleanly with an install hint if missing. | #6 |
 | `run_top5_parallel.py` | Fixed-universe parallel portfolio of 5 SuperTrend(10, 3) instances (BTC, ETH, SOL, BNB, XRP). Equal risk per asset, up to 5 concurrent positions, no rotation. Optional per-asset HMM overlay; tests 4 variants. | #14 |
 | `run_funding_filter.py` | Funding-rate filter / sizing overlay. Loads BTC + ETH perpetuals funding from Binance Vision, forward-fills to 4h decision bars (causal), and blocks new longs when rolling 30-day funding percentile exceeds the threshold. 5 variants. | #7 |
+| `monitor_strategy_decay.py` | Live decay monitor. Reads `state/trades.jsonl`, computes rolling PF / DD / win-rate / consecutive-losses over configurable windows, compares to research-time baselines. Exit codes 0 / 1 / 2 for OK / DEGRADED / insufficient. Monitor-only. | #15 |
 | `replay_live.py` | Replay mode — feed historical bars through the live engine at any speed. Educational / intuition-building tool. Does not trade, does not write to `state/`. | — |
 | `test_markov_regime.py` | Unit-style validators for the Markov module. Not an experiment. | — |
 
@@ -53,6 +54,11 @@ uv run python scripts/run_markov_research.py --n-months 48
 uv run python scripts/replay_live.py \
     --strategy state/strategy_supertrend.yaml \
     --n-months 24 --bars-per-second 20 --quiet-flat
+
+# Decay monitor — is the live paper strategy drifting from research?
+uv run python scripts/monitor_strategy_decay.py
+# self-test against fixture (no network, no live state required):
+uv run python scripts/monitor_strategy_decay.py --self-test
 ```
 
 Every script supports `--help`. The flags all have sensible defaults

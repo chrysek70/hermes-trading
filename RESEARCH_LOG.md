@@ -433,22 +433,61 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Live decay monitor (Issue #15) — shipped
+
+`scripts/monitor_strategy_decay.py` reads `state/trades.jsonl`,
+computes per-window metrics (PF, DD, win rate, total return,
+consecutive trailing losses, average holding time, best / worst
+trade) over configurable windows (default 10 / 25 / 50 trades) and
+compares each to research-time baselines.
+
+Default baselines match Issue #14's adopted
+`btc_eth_reference_parallel` (PF 2.50, DD 5.54%, win 48.7%) — these
+are CLI-overridable to track whatever strategy is actually live.
+
+Warnings fire on:
+
+- profit factor < 1.20
+- win rate < 65% of baseline
+- max drawdown > 125% of baseline
+- consecutive trailing losses ≥ 4
+- total return < 0 over the window
+
+Output is human-readable by default; `--json` plus `--output` writes
+a structured report for log aggregators. Exit codes: `0` OK,
+`1` DEGRADED, `2` INSUFFICIENT_DATA. A self-test
+(`--self-test`) covers 14 invariants against a fixture; pytest is
+not yet a project dependency, but the monitor's core
+(`build_report`, `compute_metrics`, `evaluate_warnings`) is plain
+functions that a pytest test could import unchanged.
+
+Sample run against the current `state/trades.jsonl` (10 closed
+trades over the recent session): status `DEGRADED` on the
+window-10 panel (PF 0.98 < 1.20 floor; total return -0.01%). This is
+the kind of state the monitor was built to surface — a real signal
+that the live strategy's recent trades are sub-baseline, with no
+attempt to "fix" anything automatically.
+
+This is **monitor / report only**. It does not modify trading
+decisions, resize positions, or auto-disable strategies. Cron / Slack
+/ Datadog integrations are deliberately out of scope and easy to add
+later via the exit code or the JSON output.
+
+See `research/decay_monitor_report.md`.
+
 ## Recommended next experiment
 
-**Live decay monitor.** Across Issues #5-#7 the pattern is clear:
-each new overlay produces smaller PF/DD improvements than the
-previous one. Funding's effect is roughly an order of magnitude
-smaller than HMM's. The infrastructure question (is the live
-strategy drifting?) is now more useful than continuing to test new
-mechanisms.
+The diminishing-returns pattern across Issues #5-#7 still holds —
+no clear research next step argues for itself. Two reasonable
+candidates from `ROADMAP.md`:
 
-Build a script that reads `state/trades.jsonl`, computes rolling
-PF / DD / win-rate on the last N trades, and flags when the live
-strategy decays below research-time expectations. Discussed
-earlier in chat as the highest-value cheap improvement.
+1. **Volatility-compression breakout** — Phase-3 audit found the
+   `med-low` ATR bucket had PF 2.84 on the v2 strategy. A focused
+   experiment on entries restricted to that bucket is the highest-prior
+   research candidate not yet tested.
+2. **Stacking HMM + funding** as a single experiment to formally
+   confirm or refute redundancy. Likely confirms redundancy, but
+   the result is publishable either way.
 
-Queue per `ROADMAP.md`:
-
-1. Live decay monitor
-2. Volatility-compression breakout (conditional)
-3. Stacking HMM + funding (formal redundancy test)
+Both are lower priority than user-driven decisions about live
+deployment of the existing adopted candidates.

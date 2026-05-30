@@ -248,6 +248,31 @@ on this universe). PF and DD both improve marginally on the parallel
 portfolio. Not a primary strategy. See
 `research/funding_rate_filter_report.md`.
 
+## Live decay monitor (Issue #15)
+
+`scripts/monitor_strategy_decay.py` reads the live worker's
+`state/trades.jsonl` and reports whether recent paper-trading
+performance has degraded versus research-time baselines:
+
+```bash
+uv run python scripts/monitor_strategy_decay.py
+# add --json --output results/decay_<ts>.json for a structured log
+# add --self-test to run the built-in regression checks
+```
+
+Per-window metrics (default windows 10 / 25 / 50): trade count,
+total / avg / median return, win rate, profit factor, max drawdown,
+average holding time, worst / best trade, trailing consecutive
+losses, latest trade time. Warns when PF < 1.20, win rate < 65% of
+baseline, DD > 125% of baseline, ≥ 4 consecutive losses, or total
+return < 0. Exit code `0` OK, `1` DEGRADED, `2` insufficient data.
+
+**Monitor / report only** — does not modify trading decisions,
+resize positions, or auto-disable strategies. Cron / Slack / Datadog
+integration is intentionally out of scope and easy to add later via
+the exit code or the JSON output. See
+`research/decay_monitor_report.md`.
+
 ## Disclaimer
 
 This repository is **research code**. No part of it is financial advice,
