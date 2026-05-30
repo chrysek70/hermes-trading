@@ -1,0 +1,62 @@
+# SuperTrend(10, 3) + BTC/ETH relative-strength on a 2-asset portfolio
+# (BTC/USDT + ETH/USDT), one position open at a time. Long-only.
+#
+# Spec from Issue #12. Hard rules locked at experiment start:
+#   - SuperTrend (10, 3) unchanged.
+#   - RS windows unchanged from Issue #5 (lookback=30, ratio_ema=30).
+#   - One position at a time across the whole portfolio.
+#   - When both BTC and ETH signal on the same bar: pick the asset with
+#     the higher RS score; if tied, the larger SuperTrend distance/ATR;
+#     if still tied, skip (no arbitrary selection).
+#   - Walk-forward OOS only.
+#   - Same fees / slippage / fold geometry as every other experiment.
+#
+# Adoption criteria (locked):
+#   - trade count >= 30
+#   - PF > 2.24 (beat BTC supertrend_only)
+#   - max DD <= 9.63% (no worse than BTC supertrend_only)
+#   - fold consistency not worse than BTC supertrend_only
+
+version: "v3-supertrend-multiasset-rs-01"
+schema: "v2-long-short-supertrend"
+rsi_period: 14
+
+regime:
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+
+setups:
+  pullback:
+    enabled: false
+  breakout:
+    enabled: false
+  supertrend:
+    enabled: true
+    period: 10
+    multiplier: 3.0
+    max_holding_bars: 0
+
+shorts:
+  enabled: false
+
+risk:
+  atr_period: 14
+  position_size_r: 0.5
+  max_hold_bars: 240
+  regime_flip_exit: false
+
+relative_strength:
+  enabled: true
+  assets: [BTC/USDT, ETH/USDT]
+  timeframe: 4h
+  lookback_bars: 30
+  ratio_ema: 30
+  min_return_advantage: 0.0
+  require_ratio_above_ema: true
+
+portfolio:
+  max_concurrent_positions: 1
+  selection_when_both_signal:
+    - rs_score          # higher wins
+    - supertrend_distance_atr  # tiebreak: (close - supertrend_line) / atr
+    - skip              # final fallback: skip both

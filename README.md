@@ -150,6 +150,35 @@ multi-asset extension (SuperTrend + RS applied to ETH as a traded
 asset on the same engine), which roughly doubles the sample. See
 `research/btc_eth_relative_strength_report.md`.
 
+## Multi-asset SuperTrend + RS portfolio (Issue #12)
+
+ETH added as a tradeable asset on the same engine; one position open
+at a time across the BTC + ETH universe. Same SuperTrend(10, 3), same
+RS config from Issue #5, same fees / fold geometry.
+
+| variant | trades | OOS return | max DD | PF | win % |
+|---|---:|---:|---:|---:|---:|
+| `btc_supertrend_only` (reference) | 35 | +38.66% | 9.63% | 2.24 | 45.7% |
+| **`eth_supertrend_only`** | 30 | +37.86% | **5.30%** | **2.92** | **63.3%** |
+| `eth_supertrend_rs_sizing` | 21 | +17.33% | 3.86% | 3.05 | 66.7% |
+| **`multiasset_supertrend_rs_one_position`** | **39** | **+40.99%** | 9.61% | **2.48** | 48.7% |
+
+**Two variants adopted as research candidates** — first since v2 to
+clear all four gates (trades ≥ 30, PF > 2.24, DD ≤ 9.63%, fold
+consistency not worse):
+
+- The multi-asset portfolio (the spec result): 39 trades, PF 2.48,
+  DD 9.61%, 12/20 folds positive.
+- ETH solo (surprise side finding): 30 trades, PF 2.92, DD 5.30%,
+  63.3% win rate. Better risk-adjusted than either BTC variant.
+
+SuperTrend(10, 3) appears to be a cleaner signal on ETH 4h than on
+BTC 4h over this window. The RS sizing overlay helps BTC but *hurts*
+ETH (the symmetric ETH overlay only allows ETH long when ETH is
+stronger than BTC, which is the minority condition over this period).
+
+Live worker unchanged. See `research/multiasset_supertrend_rs_report.md`.
+
 ## Disclaimer
 
 This repository is **research code**. No part of it is financial advice,

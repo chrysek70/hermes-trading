@@ -205,16 +205,51 @@ HMM remains queued behind that.
 
 See `research/btc_eth_relative_strength_report.md`.
 
+## Multi-asset SuperTrend + RS portfolio (Issue #12)
+
+ETH added as a tradeable asset on the same engine. One position open
+at a time across BTC + ETH. When both signal on the same bar: pick by
+RS score → SuperTrend distance → skip. Same SuperTrend(10, 3), same
+RS config, same fees and fold geometry as Issue #5 / #11.
+
+48-month walk-forward, 20 folds:
+
+| variant | n | OOS return | max DD | PF | Sharpe | win % | folds+ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `btc_supertrend_only` | 35 | +38.66% | 9.63% | 2.24 | 0.266 | 45.7% | 10/20 |
+| `eth_supertrend_only` | 30 | +37.86% | **5.30%** | **2.92** | **0.336** | **63.3%** | 10/20 |
+| `eth_supertrend_rs_sizing` | 21 | +17.33% | 3.86% | 3.05 | 0.380 | 66.7% | 8/20 |
+| `multiasset_supertrend_rs_one_position` | **39** | **+40.99%** | 9.61% | **2.48** | 0.276 | 48.7% | **12/20** |
+
+**Two variants adopted as research candidates** — first to clear all
+four gates (trades ≥ 30, PF > 2.24, DD ≤ 9.63%, fold consistency not
+worse) since v2 itself:
+
+- The multi-asset portfolio (the spec result): 39 trades, PF 2.48,
+  DD 9.61% (by 0.02 pp), 12/20 folds positive. Universe-expansion
+  thesis validated.
+- ETH solo (surprise side finding): 30 trades exactly, PF 2.92, DD
+  5.30%, 63.3% win rate. Markedly better risk-adjusted than BTC.
+  SuperTrend(10, 3) is cleaner on ETH 4h than BTC 4h on this window.
+
+Counterintuitive sub-finding: the symmetric ETH RS overlay *hurts*
+ETH (cuts return +37.86% → +17.33%) because the "ETH stronger than
+BTC" condition is the minority over this window — the overlay chokes
+off actually-winning ETH trades. The RS overlay is BTC-favoring by
+construction; symmetry does not equal generality.
+
+See `research/multiasset_supertrend_rs_report.md`.
+
 ## Recommended next experiment
 
-**Multi-asset SuperTrend + RS (BTC and ETH combined).** Direct
-follow-up to Issue #5's near-miss. Same code, ETH added as a traded
-asset. Doubles sample at zero parameter cost — the right way to test
-whether the 49% PF lift / 35% DD cut from RS holds on a sample large
-enough to clear the discipline gate.
+**Broader top-5 crypto rotation.** Universe expansion just worked
+(Issue #12). The natural next step is BTC + ETH + SOL + AVAX + LINK
+(or similar) on the same SuperTrend(10, 3) engine, possibly with a
+small concurrent-position budget. This is also a clean way to look
+for more ETH-quality signals on other liquid mid-caps.
 
 Queue per `ROADMAP.md`:
 
-1. Multi-asset SuperTrend + RS (BTC and ETH)
+1. Top-5 crypto rotation (new issue)
 2. HMM 2-state regime overlay (Issue #6)
 3. Funding-rate stress filter

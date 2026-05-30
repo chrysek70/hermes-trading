@@ -16,6 +16,8 @@ worker's state files.
 | `run_markov_research.py` | Six-mode Markov regime sweep on `strategy_v2_long_short.yaml`. Original disciplined Markov rebuild. | #2 |
 | `run_supertrend_extended.py` | SuperTrend(10, 3) walk-forward on N months. Three variants: baseline, supertrend_only, supertrend + Markov routing. | #4, #11 |
 | `run_btc_eth_rs.py` | BTC/ETH relative-strength experiment. Four variants: baseline_v2, supertrend_only, supertrend + RS filter, supertrend + RS sizing. ETH used as market context only (not traded). | #5 |
+| `run_multiasset_supertrend_rs.py` | Multi-asset SuperTrend + RS with BTC and ETH as a one-position-at-a-time portfolio. Five variants including ETH-as-traded-asset solo and the multi-asset combination. | #12 |
+| `replay_live.py` | Replay mode — feed historical bars through the live engine at any speed. Educational / intuition-building tool. Does not trade, does not write to `state/`. | — |
 | `test_markov_regime.py` | Unit-style validators for the Markov module. Not an experiment. | — |
 
 ## How to run
@@ -36,8 +38,17 @@ uv run python scripts/run_supertrend_extended.py --n-months 36
 # Reproduce the BTC/ETH RS experiment (Issue #5)
 uv run python scripts/run_btc_eth_rs.py
 
+# Reproduce the multi-asset SuperTrend + RS portfolio (Issue #12)
+uv run python scripts/run_multiasset_supertrend_rs.py
+
 # The Markov sweep (Issue #2)
 uv run python scripts/run_markov_research.py --n-months 48
+
+# Replay mode — watch what the bot WOULD have done on history
+# (educational; not an experiment)
+uv run python scripts/replay_live.py \
+    --strategy state/strategy_supertrend.yaml \
+    --n-months 24 --bars-per-second 20 --quiet-flat
 ```
 
 Every script supports `--help`. The flags all have sensible defaults

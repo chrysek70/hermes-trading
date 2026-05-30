@@ -48,6 +48,107 @@ def compute_features(
     }, index=idx)
 
 
+def compute_multi_asset_features(
+    btc_df: pd.DataFrame,
+    eth_df: pd.DataFrame,
+    lookback_bars: int = 30,
+    ratio_ema: int = 30,
+) -> pd.DataFrame:
+    """Like ``compute_features`` but also returns the ETH-perspective
+    ratio and its EMA, so symmetric per-asset decisions can be built.
+
+    EMA(1/x) != 1/EMA(x), so the ETH/BTC ratio EMA must be computed
+    independently from the BTC/ETH ratio EMA — not derived as 1/btc_ema.
+    """
+    idx = btc_df.index.intersection(eth_df.index)
+    btc = btc_df.loc[idx, "close"]
+    eth = eth_df.loc[idx, "close"]
+
+    btc_return_n = btc / btc.shift(lookback_bars) - 1.0
+    eth_return_n = eth / eth.shift(lookback_bars) - 1.0
+    btc_minus_eth_return_n = btc_return_n - eth_return_n
+
+    btc_eth_ratio = btc / eth
+    btc_eth_ratio_ema = _ema(btc_eth_ratio, ratio_ema)
+    eth_btc_ratio = eth / btc
+    eth_btc_ratio_ema = _ema(eth_btc_ratio, ratio_ema)
+
+    return pd.DataFrame({
+        "btc_return_n": btc_return_n,
+        "eth_return_n": eth_return_n,
+        "btc_minus_eth_return_n": btc_minus_eth_return_n,
+        "btc_eth_ratio": btc_eth_ratio,
+        "btc_eth_ratio_ema": btc_eth_ratio_ema,
+        "eth_btc_ratio": eth_btc_ratio,
+        "eth_btc_ratio_ema": eth_btc_ratio_ema,
+    }, index=idx)
+
+
+def build_asset_decisions(
+    features: pd.DataFrame,
+    asset: str,
+    mode: str = "sizing",
+    min_return_advantage: float = 0.0,
+) -> pd.DataFrame:
+    """Build a single-asset decisions_df from the multi-asset features.
+
+    ``asset`` is ``"btc"`` or ``"eth"``; the gates are symmetric:
+      - BTC long: btc_minus_eth_return >= 0 AND btc_eth_ratio > btc_eth_ema
+      - ETH long: eth_minus_btc_return >= 0 AND eth_btc_ratio > eth_btc_ema
+    """
+    if asset == "btc":
+        return_diff = features["btc_minus_eth_return_n"]
+        ratio_gate = features["btc_eth_ratio"] > features["btc_eth_ratio_ema"]
+        warmup = (features["btc_minus_eth_return_n"].isna()
+                  | features["btc_eth_ratio_ema"].isna())
+    elif asset == "eth":
+        return_diff = -features["btc_minus_eth_return_n"]
+        ratio_gate = features["eth_btc_ratio"] > features["eth_btc_ratio_ema"]
+        warmup = (features["btc_minus_eth_return_n"].isna()
+                  | features["eth_btc_ratio_ema"].isna())
+    else:
+        raise ValueError(f"unknown asset: {asset!r}")
+
+    return_gate = return_diff >= min_return_advantage
+
+    if mode == "filter":
+        long_allowed = (return_gate & ratio_gate)
+        size_mult = pd.Series(1.0, index=features.index)
+        long_allowed = long_allowed.where(~warmup, True)
+    elif mode == "sizing":
+        pass_count = return_gate.astype(int) + ratio_gate.astype(int)
+        size_mult = pass_count.map({2: 1.0, 1: 0.5, 0: 0.0}).astype(float)
+        long_allowed = size_mult > 0.0
+        size_mult = size_mult.where(~warmup, 1.0)
+        long_allowed = long_allowed.where(~warmup, True)
+    else:
+        raise ValueError(f"unknown mode: {mode!r}")
+
+    def _label(rg: bool, rp: bool, w: bool) -> str:
+        if w:
+            return "rs_warmup"
+        if rg and rp:
+            return "rs_strong"
+        if rg or rp:
+            return "rs_partial"
+        return "rs_weak"
+
+    raw_state = pd.Series(
+        [_label(bool(r), bool(rp), bool(w))
+         for r, rp, w in zip(return_gate.values, ratio_gate.values, warmup.values)],
+        index=features.index,
+    )
+
+    return pd.DataFrame({
+        "long_allowed": long_allowed.astype(bool),
+        "size_multiplier": size_mult.astype(float),
+        "raw_state": raw_state,
+        "stable_state": raw_state,
+        "regime_score": size_mult.astype(float),
+        "allowed_setups": pd.Series([None] * len(features), index=features.index, dtype=object),
+    }, index=features.index)
+
+
 def build_decisions(
     btc_df: pd.DataFrame,
     eth_df: pd.DataFrame,

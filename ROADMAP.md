@@ -52,6 +52,9 @@ tuning to make a variant cross the bar after the fact.
 | v2 baseline on 48mo (sanity ref) | 1.09 | +3.28% | reference only — baseline degrades materially on extended window (PF 1.69 → 1.09), indicating the original 24mo window was favorable for v2 setups. |
 | **SuperTrend + BTC/ETH RS filter (Issue #5)** | **3.33** | **+35.43%** | not adopted: PF beats supertrend_only by 49% and DD drops 9.63% → 7.07%, but trade count falls to 20 — fails the 30-trade discipline gate. RS mechanism is validated; sample-blocked. |
 | SuperTrend + BTC/ETH RS sizing (Issue #5) | 3.01 | +38.03% | not adopted: best DD of any SuperTrend variant (6.29%) and 27 trades — closest variant yet to clearing the gate, still 3 short. Same mechanism as filter; gentler implementation. |
+| **ETH SuperTrend(10, 3) solo (Issue #12 side finding)** | **2.92** | **+37.86%** | **adopted as research candidate**: 30 trades exactly at the gate, max DD 5.30% (best of any SuperTrend variant), 63.3% win rate, Sharpe 0.336. Surprise discovery — SuperTrend is cleaner on ETH 4h than BTC 4h over this window. Live worker NOT modified. See `research/multiasset_supertrend_rs_report.md`. |
+| ETH SuperTrend + RS sizing (Issue #12) | 3.05 | +17.33% | not adopted: 21 trades, 8/20 folds positive (worse than baseline). The symmetric RS overlay chokes off ETH's actually-winning trades (ETH-stronger condition rare in this window). |
+| **Multi-asset SuperTrend + RS, one position (Issue #12)** | **2.48** | **+40.99%** | **adopted as research candidate**: 39 trades, max DD 9.61% (by 0.02 pp), 12/20 folds positive (better than BTC baseline). Universe expansion thesis validated — clears the 30-trade gate that BTC-only RS missed. BTC contributes 26/13 trades and most return; ETH lifts the count past the gate. |
 
 ## Rejected experiment patterns
 
@@ -68,18 +71,19 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **Multi-asset extension: SuperTrend + RS on BTC and ETH combined.**
-   Direct follow-up to Issue #5's near-miss: RS filter/sizing variants
-   both cleared the PF and DD criteria but fell short of the 30-trade
-   gate (20 / 27 trades vs 35). Adding ETH as a traded asset on the
-   same engine roughly doubles the sample. This is the cleanest way to
-   resolve the count-gate question Issue #5 leaves open. NOT a parameter
-   tune of either SuperTrend or the RS config.
+1. **Broader top-5 crypto rotation (recommended after #12 success).**
+   Direct follow-up to Issue #12's clean pass: universe expansion just
+   *worked* (39 trades, PF 2.48, both gates cleared). The natural next
+   step is to expand the universe to ~5 assets (BTC, ETH, SOL, AVAX,
+   LINK or similar) on the same SuperTrend(10, 3) engine, possibly with
+   a small concurrent-position budget (2 of 5) instead of strict
+   one-at-a-time. Also a clean way to look for more ETH-quality signals
+   (low DD, high PF, mid frequency).
 
 2. **HMM 2-state regime overlay (optional `hmmlearn` dep) — Issue #6.**
    Hypothesis: latent states found by EM are cleaner than the hand-defined
    6-state Markov alphabet; soft probabilities feed exposure scaling.
-   Orthogonal to RS — does not benefit from the multi-asset extension.
+   Orthogonal to universe expansion — can stack later.
 
 3. **Funding-rate stress filter.**
    Hypothesis: extreme perpetuals funding precedes squeezes; gate
