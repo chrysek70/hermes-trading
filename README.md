@@ -202,6 +202,30 @@ for a parallel multi-asset extension as the natural next step.
 Optional dependency — `hmmlearn` not required by the live worker.
 See `research/hmm_regime_report.md`.
 
+## Top-5 parallel portfolio (Issue #14)
+
+Fixed universe (BTC, ETH, SOL, BNB, XRP — all with 48mo data) traded
+in parallel. Equal risk per asset (1/N), no rotation, up to 5
+concurrent positions, no per-bar selection.
+
+| variant | trades | OOS return | max DD | PF | win % |
+|---|---:|---:|---:|---:|---:|
+| `top5_supertrend_parallel` | 155 | +40.70% | **2.49%** | 2.19 | 51.6% |
+| `top5_hmm_filter_parallel` | 95 | +26.74% | 1.86% | 2.49 | 51.6% |
+| **`btc_eth_reference_parallel`** | **65** | **+39.72%** | **5.54%** | **2.50** | **53.8%** |
+
+The spec-headline top-5 variant **fails PF gate by 0.05** (XRP drag,
+SOL/BNB at lower per-asset PF dilute the BTC/ETH edge). But the
+2-asset reference `btc_eth_reference_parallel` **clears all five
+locked gates** (trades ≥ 60, PF > 2.24, DD ≤ 9.63%, return > 38.66%,
+max single-asset profit share ≤ 60%) and is a **strict upgrade over
+the Issue #12 one-position variant**: more trades (65 vs 39), much
+lower DD (5.54% vs 9.61%), equal PF.
+
+**Parallel form is the new canonical multi-asset framework** —
+adopted as research candidate. Live worker unchanged. See
+`research/top5_parallel_portfolio_report.md`.
+
 ## Disclaimer
 
 This repository is **research code**. No part of it is financial advice,

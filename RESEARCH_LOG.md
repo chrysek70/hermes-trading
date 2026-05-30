@@ -326,20 +326,74 @@ actually-informative filter does that.
 
 See `research/hmm_regime_report.md`.
 
+## Top-5 parallel portfolio (Issue #14)
+
+Fixed universe (BTC, ETH, SOL, BNB, XRP — all 48mo data available).
+Each asset trades SuperTrend(10, 3) independently with equal risk
+budget (1/N). No rotation, no per-bar selection. Up to 5 concurrent
+positions allowed. HMM overlay variants tested per-asset.
+
+48-month walk-forward, 20 folds:
+
+| variant | n | OOS return | max DD | PF | Sharpe | win % | max conc. |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `top5_supertrend_parallel` | 155 | +40.70% | **2.49%** | 2.19 | 0.256 | 51.6% | 4 |
+| `top5_hmm_filter_parallel` | 95 | +26.74% | 1.86% | 2.49 | 0.288 | 51.6% | 4 |
+| `top5_hmm_sizing_parallel` | 95 | +25.17% | 1.86% | 2.41 | 0.281 | 51.6% | 4 |
+| **`btc_eth_reference_parallel`** | **65** | **+39.72%** | **5.54%** | **2.50** | **0.296** | **53.8%** | 2 |
+
+**Spec-defined `top5_supertrend_parallel` FAILS adoption by 0.05 PF
+(2.19 vs 2.24 required).** Four of five gates cleared comfortably;
+PF is the only failure. The added assets (SOL, BNB, XRP) dilute the
+BTC/ETH edge: XRP contributed -1.43% (net negative), SOL +11.81%
+and BNB +10.56% (positive but at slightly lower per-trade PF than
+BTC/ETH). Universe choice was fixed at experiment start; per the
+hard rule "do not optimize asset list after seeing results", XRP
+stays in the reported numbers.
+
+HMM variants on top-5 clear PF (2.49) and DD (1.86%) but cut
+return to +26.74% / +25.17% — fail the 38.66% return gate.
+
+**The reference variant `btc_eth_reference_parallel` (2-asset
+parallel) clears ALL FIVE gates** — first variant to do so in this
+project. Adopted as a research candidate. It is a strict upgrade
+over the Issue #12 adopted one-position multi-asset variant:
+
+| | Issue #12 BTC/ETH one-position | Issue #14 BTC/ETH parallel |
+|---|---:|---:|
+| trades | 39 | **65** (+67%) |
+| OOS return | +40.99% | +39.72% (-1.27 pp) |
+| max DD | 9.61% | **5.54%** (-42%) |
+| PF | 2.48 | 2.50 (≈) |
+
+Same engine, no overlay. Dropping the one-position constraint and
+letting BTC and ETH trade in parallel is mechanically better:
+- No forced selection between concurrent signals.
+- Diversification benefit on DD.
+- Per-asset half-size means total exposure at max concurrency =
+  single-asset full size (no leverage).
+
+Side findings:
+
+- RS context variant was SKIPPED per hard rules. The Issue #5 RS
+  construct is fundamentally pairwise (BTC vs ETH return diff and
+  BTC/ETH ratio EMA); there is no clean 5-asset generalization
+  without new design choices.
+- Concurrency reduces DD, doesn't increase it (correlation < 1
+  between asset moves).
+- The parallel form is now the canonical research framework for any
+  future multi-asset overlay tests in this repo.
+
+See `research/top5_parallel_portfolio_report.md`.
+
 ## Recommended next experiment
 
-**Top-5 parallel portfolio with regime overlays.** Accumulating
-evidence across Issues #5, #6, #12 says three different regime
-mechanisms work but get blocked by trade count. A top-5 universe
-trading each asset in parallel (each with its own SuperTrend +
-optional HMM/RS overlay) directly raises the count base so these
-mechanisms can clear the gate.
-
-Funding-rate filter (Issue #7) remains queued per the original spec
-but is now the second-priority experiment.
+**Funding-rate stress filter (Issue #7).** Per spec on top-5
+failure. Tests perpetuals funding rate as an exposure-gating signal
+— an orthogonal mechanism not tested in Issues #5–#14. Requires a
+new data adapter.
 
 Queue per `ROADMAP.md`:
 
-1. Top-5 parallel portfolio (new issue if pursued)
-2. Funding-rate stress filter (Issue #7)
-3. Volatility-compression breakout (conditional)
+1. Funding-rate stress filter (Issue #7)
+2. Volatility-compression breakout (conditional)

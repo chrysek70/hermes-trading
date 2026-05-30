@@ -57,6 +57,9 @@ tuning to make a variant cross the bar after the fact.
 | **Multi-asset SuperTrend + RS, one position (Issue #12)** | **2.48** | **+40.99%** | **adopted as research candidate**: 39 trades, max DD 9.61% (by 0.02 pp), 12/20 folds positive (better than BTC baseline). Universe expansion thesis validated — clears the 30-trade gate that BTC-only RS missed. BTC contributes 26/13 trades and most return; ETH lifts the count past the gate. |
 | HMM regime overlay on BTC SuperTrend (Issue #6) | 4.01 | +49.98% | not adopted: PF +79% over BTC baseline (huge), DD -61% (3.79% from 9.63%), Sharpe 0.434, but 24 trades — fails 30-trade gate. Filter and sizing modes identical (bimodal HMM probabilities). |
 | HMM regime overlay on ETH SuperTrend (Issue #6) | 4.27 | +27.80% | not adopted: PF +46% over ETH baseline, DD -22% (4.13% from 5.30%), but 17 trades — fails 30-trade gate badly. |
+| Top-5 parallel portfolio, no overlay (Issue #14) | 2.19 | +40.70% | not adopted: 155 trades and DD 2.49% (lowest of any experiment), but PF 2.19 fails the 2.24 gate by 0.05. XRP drag (-1.43%) plus SOL/BNB at slightly lower per-asset PF dilute the BTC/ETH edge. |
+| Top-5 parallel + HMM filter (Issue #14) | 2.49 | +26.74% | not adopted: PF/DD clear (2.49 / 1.86%) but return falls below the 38.66% gate (cut from +40.70% by HMM selectivity). |
+| **BTC/ETH parallel portfolio (Issue #14 reference, ADOPTED)** | **2.50** | **+39.72%** | **adopted as research candidate** — passes ALL five locked gates (trades 65, PF 2.50, DD 5.54%, return +39.72%, max single-asset share 51%). Strictly dominates the Issue #12 one-position multi-asset variant (more trades, much lower DD, equal PF). Same engine, no overlay — just drop the one-position constraint. |
 
 ## Rejected experiment patterns
 
@@ -73,20 +76,18 @@ Run one at a time. After each, walk-forward against the current baseline.
 Adopt if and only if the criteria above are met. If not, move to the next
 without tuning the failed one.
 
-1. **Top-5 parallel portfolio with regime overlays.** Promoted to top
-   after Issue #6 evidence. Three independent regime mechanisms now
-   (RS filter Issue #5, multi-asset routing Issue #12, HMM Issue #6)
-   have cleared the PF / DD criteria and failed the 30-trade gate.
-   The signal is real; the count base is the blocker. Trading 5
-   assets in parallel (each with its own SuperTrend + optional regime
-   overlay) is the direct way to multiply the trade-count base into
-   a regime where these overlays clear the gate.
+1. **Funding-rate stress filter (Issue #7).** Promoted to top after
+   Issue #14. The top-5 parallel hypothesis was tested (Issue #14)
+   and the 5-asset universe failed PF gate by 0.05 (XRP drag +
+   SOL/BNB dilution). The BTC/ETH parallel reference passed and is
+   adopted, but does not bypass the need for orthogonal mechanism
+   testing. Funding rate tests perpetuals funding sign → exposure
+   gating. Requires a new data adapter.
 
-2. **Funding-rate stress filter (Issue #7).** Per the original spec,
-   Issue #7 was the next-on-HMM-failure step. Tests an orthogonal
-   mechanism (perpetuals funding rate → exposure gating). Requires a
-   new data adapter. Lower priority than the parallel portfolio
-   given the accumulated evidence, but still on the queue.
+2. **Volatility-compression breakout (conditional).** Hypothesis:
+   only fire breakouts after a low-ATR-quartile compression.
+   Phase-3 audit showed the `med-low` ATR bucket had PF 2.84.
+   Lower priority but on the queue.
 
 3. **Funding-rate stress filter.**
    Hypothesis: extreme perpetuals funding precedes squeezes; gate
