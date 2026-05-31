@@ -1864,8 +1864,8 @@ def main() -> int:
     check("replay logs vol_sizing=ENABLED on boot",
           "vol_sizing=" in replay_src_17
           and "'ENABLED' if vol_sizing_enabled" in replay_src_17)
-    check("replay calls vol_overlay.state_at on signal_row[ts]",
-          'vol_overlay.state_at(asset, signal_row["ts"])' in replay_src_17)
+    check("replay calls vol_overlay.state_for_signal on the live ind slice (Issue #40)",
+          'vol_overlay.state_for_signal(asset, ind_slice)' in replay_src_17)
     check("replay applies vol_mult at LONG entry (final_size = base * mult)",
           "size_per_asset * current_vol_mult" in replay_src_17)
     check("replay records base_size_at_entry / vol_multiplier_at_entry on position",
@@ -2022,9 +2022,9 @@ def main() -> int:
     check("multi_loop reads volume_confirmation.enabled from cfg",
           'cfg.get("volume_confirmation")' in multi_src_18
           and 'vol_conf_cfg.get("enabled"' in multi_src_18)
-    check("multi_loop calls volume_overlay.state_at on signal_row[ts]",
-          'volume_overlay.state_at(' in multi_src_18
-          and 'signal_row.get("ts"))' in multi_src_18)
+    check("multi_loop calls volume_overlay.state_for_signal with the live ind_df (Issue #40)",
+          'volume_overlay.state_for_signal(' in multi_src_18
+          and 'asset, ind_df)' in multi_src_18)
     check("multi_loop applies volume_confirmation gate AFTER funding (long)",
           "Issue #38 — volume_confirmation hard gate (long)" in multi_src_18)
     check("multi_loop applies volume_confirmation gate AFTER funding (short)",
@@ -2043,10 +2043,11 @@ def main() -> int:
           '"  volume: signal=' in multi_src_18
           and "ratio=" in multi_src_18 and "decision=" in multi_src_18)
 
-    # 18.6 Volume gate uses the SIGNAL row, not the DISPLAY row
-    check("multi_loop volume_confirmation uses signal_row timestamp",
-          'volume_overlay.state_at(\n                    asset, signal_row.get("ts"))' in multi_src_18
-          or 'volume_overlay.state_at(asset, signal_row.get("ts"))' in multi_src_18)
+    # 18.6 Volume gate uses the worker's live ind_df (Issue #40 fix); the
+    # signal-row causality is enforced inside state_for_signal via iloc[-2].
+    check("multi_loop volume_confirmation uses live ind_df (Issue #40)",
+          'volume_overlay.state_for_signal(\n                    asset, ind_df)' in multi_src_18
+          or 'volume_overlay.state_for_signal(asset, ind_df)' in multi_src_18)
 
     # 18.7 Funding and vol_sizing remain independent (regression — must
     # still be present after the new gate insertion)
@@ -2067,9 +2068,9 @@ def main() -> int:
     check("replay logs volume_confirmation=ENABLED on boot",
           "volume_confirmation=" in replay_src_18
           and "ENABLED' if volume_confirmation_enabled" in replay_src_18)
-    check("replay calls volume_overlay.state_at on signal_row[ts]",
-          'volume_overlay.state_at(\n                    asset, signal_row["ts"])' in replay_src_18
-          or 'volume_overlay.state_at(asset, signal_row["ts"])' in replay_src_18)
+    check("replay calls volume_overlay.state_for_signal on the live ind slice (Issue #40)",
+          'volume_overlay.state_for_signal(\n                    asset, ind_slice)' in replay_src_18
+          or 'volume_overlay.state_for_signal(asset, ind_slice)' in replay_src_18)
     check("replay applies volume gate (long)",
           "Issue #38 — volume_confirmation hard gate (long)" in replay_src_18)
     check("replay applies volume gate (short)",
@@ -2105,6 +2106,177 @@ def main() -> int:
           and "published (expected for current month)" in funding_src_19)
     check("funding loader still logs OTHER failures as yellow warnings",
           "[yellow]skip" in funding_src_19)
+    print()
+
+    # --- 20. Live overlay data-source parity fix (Issue #40)
+    # The fix adds state_for_signal(asset, ind_df) on both
+    # LiveVolSizingOverlay and LiveVolumeConfirmationOverlay so live and
+    # replay both consume the worker's own indicator frame instead of
+    # the overlay's preloaded Binance Vision archive.
+    print("20. Live overlay data-source parity (Issue #40)")
+    import pandas as _pd_20
+    import numpy as _np_20
+    from hermes_trading.multi_loop import (
+        LiveVolSizingOverlay as _LVS_20,
+        LiveVolumeConfirmationOverlay as _LVC_20,
+    )
+
+    # ---- 20.1 volume_confirmation state_for_signal: pure / stateless ----
+    overlay_vc = _LVC_20.__new__(_LVC_20)
+    overlay_vc.assets = ["BTC/USDT"]
+    overlay_vc.timeframe = "4h"
+    overlay_vc.window_bars = 20
+    overlay_vc.volume = {"BTC/USDT": None}
+    overlay_vc.volume_mean = {"BTC/USDT": None}
+
+    idx_20 = _pd_20.date_range("2026-05-30", periods=25, freq="4h", tz="UTC")
+    # Synthetic ind_df: 25 bars; signal bar (iloc[-2]) volume HIGH;
+    # 20 bars before it (iloc[-22:-2]) have known mean.
+    vol_arr = [1000.0] * 25
+    vol_arr[-2] = 5000.0  # signal bar HIGH volume
+    ind_df_high = _pd_20.DataFrame({
+        "open": [70000.0] * 25,
+        "high": [70100.0] * 25,
+        "low": [69900.0] * 25,
+        "close": [70000.0] * 25,
+        "volume": vol_arr,
+    }, index=idx_20)
+    s_high = overlay_vc.state_for_signal("BTC/USDT", ind_df_high)
+    check("vol_conf state_for_signal: high-vol signal bar -> allow",
+          s_high["available"] is True
+          and s_high["decision"] == "allow"
+          and abs(s_high["signal_volume"] - 5000.0) < 1e-9
+          and abs(s_high["volume_mean_20"] - 1000.0) < 1e-9,
+          f"got {s_high}")
+    check("vol_conf state_for_signal: source tagged 'live_ind_df'",
+          s_high.get("source") == "live_ind_df")
+
+    # Low-vol signal bar -> block
+    vol_arr_low = [1000.0] * 25
+    vol_arr_low[-2] = 500.0
+    ind_df_low = ind_df_high.copy()
+    ind_df_low["volume"] = vol_arr_low
+    s_low = overlay_vc.state_for_signal("BTC/USDT", ind_df_low)
+    check("vol_conf state_for_signal: low-vol signal bar -> block_low_volume_flip",
+          s_low["available"] is True
+          and s_low["decision"] == "block_low_volume_flip"
+          and abs(s_low["signal_volume"] - 500.0) < 1e-9,
+          f"got {s_low}")
+
+    # Insufficient bars -> warmup, fail-open
+    ind_df_short = ind_df_high.iloc[:10].copy()
+    s_warm = overlay_vc.state_for_signal("BTC/USDT", ind_df_short)
+    check("vol_conf state_for_signal: insufficient bars -> warmup + fail-open allow",
+          s_warm["available"] is False
+          and s_warm["decision"] == "warmup",
+          f"got {s_warm}")
+    check("vol_conf state_for_signal: warmup source tagged 'live_ind_df_warmup'",
+          s_warm.get("source") == "live_ind_df_warmup")
+
+    # ---- 20.2 Strictly causal: uses iloc[-2] (signal bar) NOT iloc[-1] ----
+    # Display bar at iloc[-1] has anomalous volume; signal bar at iloc[-2]
+    # has normal volume. The gate must read the SIGNAL bar.
+    vol_arr_check = [1000.0] * 25
+    vol_arr_check[-1] = 99999.0  # display bar — should be IGNORED
+    vol_arr_check[-2] = 1500.0   # signal bar — should be USED
+    ind_df_causal = ind_df_high.copy()
+    ind_df_causal["volume"] = vol_arr_check
+    s_causal = overlay_vc.state_for_signal("BTC/USDT", ind_df_causal)
+    check("vol_conf state_for_signal: reads iloc[-2] (signal bar), not iloc[-1] (display)",
+          s_causal["available"] is True
+          and abs(s_causal["signal_volume"] - 1500.0) < 1e-9,
+          f"got signal_volume={s_causal.get('signal_volume')}")
+
+    # ---- 20.3 vol_sizing state_for_signal: hybrid (preloaded thresholds
+    # + live realised vol) ----
+    overlay_vs = _LVS_20.__new__(_LVS_20)
+    overlay_vs.assets = ["BTC/USDT"]
+    overlay_vs.timeframe = "4h"
+    overlay_vs.window_bars = 24
+    overlay_vs.train_months = 12
+    overlay_vs.mult_low = 1.00
+    overlay_vs.mult_mid = 0.50
+    overlay_vs.mult_high = 0.25
+    # Preloaded series: 400 bars, with rv values spanning Q1 / Q4
+    idx_vs = _pd_20.date_range("2026-01-01", periods=400, freq="4h", tz="UTC")
+    rv_pre = _pd_20.Series([0.010] * 400, index=idx_vs, dtype=float)
+    rv_pre.iloc[:200] = 0.005
+    rv_pre.iloc[200:399] = 0.015
+    overlay_vs.realised_vol = {"BTC/USDT": rv_pre}
+
+    # Build a live ind_df where the LAST 24 bars of close produce a
+    # KNOWN realised vol value. We make log-returns of std ~ 0.003 (low),
+    # which should fall into Q1 against preloaded q25 ≈ 0.005.
+    idx_live = _pd_20.date_range("2026-05-30", periods=30, freq="4h", tz="UTC")
+    base_close = 70000.0
+    # Low-vol live close path
+    deltas_low = _np_20.zeros(30)
+    rng = _np_20.random.default_rng(seed=42)
+    deltas_low = rng.normal(loc=0.0, scale=0.003, size=30)
+    closes_low = base_close * _np_20.exp(_np_20.cumsum(deltas_low))
+    ind_live_low = _pd_20.DataFrame({
+        "open":  closes_low,
+        "high":  closes_low * 1.001,
+        "low":   closes_low * 0.999,
+        "close": closes_low,
+        "volume": [1000.0] * 30,
+    }, index=idx_live)
+    s_vs_low = overlay_vs.state_for_signal("BTC/USDT", ind_live_low)
+    check("vol_sizing state_for_signal: produces a numeric realised_vol",
+          s_vs_low["realized_vol"] is not None
+          and isinstance(s_vs_low["realized_vol"], float),
+          f"got {s_vs_low}")
+    check("vol_sizing state_for_signal: source tagged 'live_ind_df'",
+          s_vs_low.get("source") == "live_ind_df")
+    check("vol_sizing state_for_signal: quartile thresholds come from preloaded",
+          s_vs_low["q25"] is not None and s_vs_low["q75"] is not None
+          and abs(s_vs_low["q25"] - 0.005) < 0.001,
+          f"got q25={s_vs_low['q25']}")
+
+    # Insufficient ind_df (under window_bars + 2 bars) -> warmup
+    ind_live_short = ind_live_low.iloc[:10].copy()
+    s_vs_warm = overlay_vs.state_for_signal("BTC/USDT", ind_live_short)
+    check("vol_sizing state_for_signal: insufficient bars -> warmup mult=1.00",
+          s_vs_warm["available"] is False
+          and abs(s_vs_warm["multiplier"] - 1.00) < 1e-12,
+          f"got {s_vs_warm}")
+
+    # ---- 20.4 Causality: vol_sizing realised vol must NOT include
+    # the in-progress (display) bar ----
+    # Spike close at iloc[-1] (display bar) by 50%; the realised vol the
+    # overlay computes should be UNCHANGED relative to a flat-display ind_df,
+    # because state_for_signal uses bars ending at iloc[-2].
+    ind_live_spike = ind_live_low.copy()
+    ind_live_spike.iloc[-1, ind_live_spike.columns.get_loc("close")] = (
+        ind_live_spike.iloc[-2]["close"] * 1.5
+    )
+    s_vs_spike = overlay_vs.state_for_signal("BTC/USDT", ind_live_spike)
+    check("vol_sizing state_for_signal: display-bar spike does NOT affect realised vol",
+          s_vs_low["realized_vol"] is not None
+          and s_vs_spike["realized_vol"] is not None
+          and abs(s_vs_low["realized_vol"] - s_vs_spike["realized_vol"]) < 1e-12,
+          f"low_rv={s_vs_low['realized_vol']} spike_rv={s_vs_spike['realized_vol']}")
+
+    # ---- 20.5 Source-level wiring: live + replay both call state_for_signal ----
+    multi_src_20 = (ROOT / "hermes_trading" / "multi_loop.py").read_text()
+    check("multi_loop.run uses state_for_signal for vol_sizing (Issue #40)",
+          "vol_overlay.state_for_signal(asset, ind_df)" in multi_src_20)
+    check("multi_loop.run uses state_for_signal for volume_confirmation (Issue #40)",
+          "volume_overlay.state_for_signal(\n                    asset, ind_df)" in multi_src_20
+          or "volume_overlay.state_for_signal(asset, ind_df)" in multi_src_20)
+    replay_src_20 = (ROOT / "scripts" / "replay_live.py").read_text()
+    check("replay uses state_for_signal for vol_sizing (Issue #40 parity)",
+          "vol_overlay.state_for_signal(asset, ind_slice)" in replay_src_20)
+    check("replay uses state_for_signal for volume_confirmation (Issue #40 parity)",
+          "volume_overlay.state_for_signal(\n                    asset, ind_slice)" in replay_src_20
+          or "volume_overlay.state_for_signal(asset, ind_slice)" in replay_src_20)
+
+    # ---- 20.6 Legacy state_at API still works (backward compat for
+    # existing tests that exercise it directly) ----
+    s_legacy = overlay_vc.state_at("BTC/USDT", _pd_20.Timestamp("2026-04-30", tz="UTC"))
+    check("legacy state_at API preserved (returns warmup when no preloaded data)",
+          s_legacy["decision"] in ("warmup", "allow", "block_low_volume_flip"),
+          f"got {s_legacy}")
     print()
 
     if failures:

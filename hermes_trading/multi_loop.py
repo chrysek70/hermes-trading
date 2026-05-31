@@ -386,6 +386,90 @@ class LiveVolSizingOverlay:
                     "bucket": "warmup", "multiplier": self.mult_low,
                     "train_n": 0}
 
+    def state_for_signal(self, asset: str, ind_df) -> dict:
+        """Issue #40 — venue-consistent live lookup.
+
+        The CURRENT realised vol is computed from the live worker's own
+        indicator frame (``ind_df``), which is the venue / feed the worker
+        is actually trading on. This eliminates the Issue #39 staleness
+        where the overlay's preloaded series ended at the prior month
+        boundary.
+
+        Quartile thresholds STILL come from the preloaded series (slow
+        moving; 1-month staleness is tolerable for the quartile shape).
+        The comparison is therefore: today's venue-consistent realised
+        vol → preloaded historical-window quartile band. Both sides are
+        realised volatility of log returns, which is largely
+        venue-invariant — Binance and Kraken see substantially the same
+        directional price moves on the same asset.
+
+        ``ind_df`` is expected to have at least ``window_bars + 2``
+        rows. Uses bars STRICTLY before the live signal bar
+        (``iloc[-2]``) so the lookup is causal — matches Issue #24
+        signal-bar semantics.
+
+        Fail-open: insufficient bars or NaN → multiplier = ``mult_low``
+        with bucket ``warmup``.
+        """
+        import numpy as _np
+        try:
+            if ind_df is None or len(ind_df) < self.window_bars + 2:
+                return {"available": False, "realized_vol": None,
+                        "q25": None, "q50": None, "q75": None,
+                        "bucket": "warmup",
+                        "multiplier": self.mult_low,
+                        "train_n": 0,
+                        "source": "live_ind_df_warmup"}
+            # signal bar = iloc[-2] (Issue #24). Realised vol over the
+            # 24 bars ENDING at the signal bar (strictly causal).
+            window_end = -2
+            window_start = window_end - self.window_bars
+            close_window = ind_df["close"].iloc[window_start - 1:window_end + 1]
+            logr = _np.log(close_window / close_window.shift(1)).dropna()
+            if len(logr) < self.window_bars:
+                return {"available": False, "realized_vol": None,
+                        "q25": None, "q50": None, "q75": None,
+                        "bucket": "warmup",
+                        "multiplier": self.mult_low,
+                        "train_n": 0,
+                        "source": "live_ind_df_warmup"}
+            current_rv = float(logr.tail(self.window_bars).std())
+            # Quartile thresholds from preloaded series at the signal
+            # bar's timestamp. If the preloaded data is stale (May 2026
+            # not yet published), the quartile shape is still
+            # representative because vol regimes evolve slowly.
+            signal_ts = ind_df.index[-2]
+            qs = self._train_window_quartiles(asset, signal_ts)
+            bucket = vol_bucket_from_thresholds(
+                current_rv, qs["q25"], qs["q75"],
+            )
+            mult = vol_multiplier_from_bucket(
+                bucket,
+                mult_low=self.mult_low,
+                mult_mid=self.mult_mid,
+                mult_high=self.mult_high,
+            )
+            available = (current_rv is not None
+                         and qs["q25"] is not None
+                         and qs["q75"] is not None)
+            return {
+                "available": bool(available),
+                "realized_vol": current_rv,
+                "q25": qs["q25"], "q50": qs["q50"], "q75": qs["q75"],
+                "bucket": bucket,
+                "multiplier": float(mult),
+                "train_n": qs["n"],
+                "source": "live_ind_df",
+            }
+        except Exception as exc:  # noqa: BLE001
+            log(f"[yellow]vol_sizing state_for_signal failed for {asset}: "
+                f"{exc}; multiplier failing open to {self.mult_low}[/yellow]")
+            return {"available": False, "realized_vol": None,
+                    "q25": None, "q50": None, "q75": None,
+                    "bucket": "warmup", "multiplier": self.mult_low,
+                    "train_n": 0,
+                    "source": "live_ind_df_error"}
+
 
 # ---------- volume confirmation overlay (Issue #38) -------------------------
 
@@ -556,6 +640,67 @@ class LiveVolumeConfirmationOverlay:
             return {"available": False, "signal_volume": None,
                     "volume_mean_20": None, "volume_ratio": None,
                     "decision": VOLUME_CONF_WARMUP, "reason": f"lookup error: {exc}"}
+
+    def state_for_signal(self, asset: str, ind_df) -> dict:
+        """Issue #40 — venue-consistent live lookup.
+
+        Both ``signal_volume`` and ``volume_mean_20`` are computed
+        directly from the live worker's own indicator frame, which is
+        the feed the worker is actually trading on. This closes the
+        Issue #39 staleness bug where the overlay's preloaded series
+        ended at the prior calendar month while live timestamps moved
+        past it.
+
+        Strictly causal:
+          - signal_volume = ind_df["volume"].iloc[-2]
+                            (the closed signal bar — Issue #24 semantics)
+          - volume_mean_20 = mean of ind_df["volume"].iloc[-22:-2]
+                            (the 20 bars BEFORE the signal bar)
+
+        ``ind_df`` is expected to have at least ``window_bars + 2``
+        rows. Fail-open if insufficient.
+
+        ``asset`` is accepted for API symmetry with ``state_at`` but is
+        not used (the indicator frame is already per-asset by the
+        caller's choice).
+        """
+        try:
+            _ = asset  # API symmetry; ind_df is already per-asset
+            if ind_df is None or len(ind_df) < self.window_bars + 2:
+                gate = evaluate_volume_confirmation_gate(None, None)
+                return {"available": False, "signal_volume": None,
+                        "volume_mean_20": None, "volume_ratio": None,
+                        "decision": gate["decision"],
+                        "reason": gate["reason"],
+                        "source": "live_ind_df_warmup"}
+            signal_vol_val = ind_df["volume"].iloc[-2]
+            sv = (float(signal_vol_val)
+                  if not pd.isna(signal_vol_val) else None)
+            # 20 bars BEFORE the signal bar (window_end exclusive)
+            window_end = -2
+            window_start = window_end - self.window_bars
+            mean_window = ind_df["volume"].iloc[window_start:window_end]
+            mean_clean = mean_window.dropna()
+            vm = (float(mean_clean.mean())
+                  if len(mean_clean) == self.window_bars else None)
+            gate = evaluate_volume_confirmation_gate(sv, vm)
+            return {
+                "available": (sv is not None and vm is not None),
+                "signal_volume": sv,
+                "volume_mean_20": vm,
+                "volume_ratio": gate["ratio"],
+                "decision": gate["decision"],
+                "reason": gate["reason"],
+                "source": "live_ind_df",
+            }
+        except Exception as exc:  # noqa: BLE001
+            log(f"[yellow]volume_confirmation state_for_signal failed for "
+                f"{asset}: {exc}; gate failing open[/yellow]")
+            return {"available": False, "signal_volume": None,
+                    "volume_mean_20": None, "volume_ratio": None,
+                    "decision": VOLUME_CONF_WARMUP,
+                    "reason": f"lookup error: {exc}",
+                    "source": "live_ind_df_error"}
 
 
 # ---------- pure helpers (used by both run loop and self-test) --------------
@@ -959,23 +1104,28 @@ async def run(
             if funding_overlay is not None:
                 funding_state = funding_overlay.state_at(asset, signal_row.get("ts"))
 
-            # Issue #33 — vol_sizing per-bar lookup. Keyed by signal bar
-            # so the multiplier the live worker uses at entry equals what
-            # walk-forward research would have used for that signal bar.
+            # Issue #33 + #40 — vol_sizing per-bar lookup. Issue #40
+            # switched live to consume the worker's own indicator frame
+            # (venue-consistent realised vol) instead of preloaded
+            # Binance Vision data (which goes stale at month boundaries).
+            # Quartile thresholds still come from the preloaded series
+            # because they evolve slowly.
             vol_state = None
             if vol_overlay is not None:
-                vol_state = vol_overlay.state_at(asset, signal_row.get("ts"))
+                vol_state = vol_overlay.state_for_signal(asset, ind_df)
             current_vol_mult = (float(vol_state["multiplier"])
                                 if vol_state is not None
                                 else 1.0)
 
-            # Issue #38 — volume_confirmation per-bar lookup. Keyed by the
-            # SIGNAL bar (Issue #24 closed-bar semantics). Decision is a
-            # hard gate alongside funding; vol_sizing remains multiplicative.
+            # Issue #38 + #40 — volume_confirmation per-bar lookup.
+            # Issue #40 switched to consuming the worker's own indicator
+            # frame so signal_volume and mean20 are both real-time and
+            # venue-consistent. Strictly causal (uses the closed signal
+            # bar and the 20 bars BEFORE it).
             volume_conf_state = None
             if volume_overlay is not None:
-                volume_conf_state = volume_overlay.state_at(
-                    asset, signal_row.get("ts"))
+                volume_conf_state = volume_overlay.state_for_signal(
+                    asset, ind_df)
 
             funding_block_message: str | None = None
             # Issue #38 — separate per-asset variable so the block message

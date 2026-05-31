@@ -549,20 +549,25 @@ def _run_config_replay(args: argparse.Namespace) -> int:
             if funding_overlay is not None:
                 funding_state = funding_overlay.state_at(asset, signal_row["ts"])
 
-            # Issue #34 — vol_sizing per-bar lookup. Same signal-bar timestamp
-            # the funding overlay uses; same semantics as multi_loop.run.
+            # Issue #34 + #40 — vol_sizing per-bar lookup. Switched to
+            # the venue-consistent ``state_for_signal`` API so live and
+            # replay use identical logic (Issue #40 parity requirement).
+            # Replay's ``ind`` slice up through the current step is the
+            # equivalent of live's ``ind_df``.
+            ind_slice = ind.iloc[: i + 1]
             vol_state = None
             if vol_overlay is not None:
-                vol_state = vol_overlay.state_at(asset, signal_row["ts"])
+                vol_state = vol_overlay.state_for_signal(asset, ind_slice)
             current_vol_mult = (float(vol_state["multiplier"])
                                 if vol_state is not None
                                 else 1.0)
 
-            # Issue #38 — volume_confirmation per-bar lookup.
+            # Issue #38 + #40 — volume_confirmation per-bar lookup,
+            # venue-consistent via the same ind_slice.
             volume_conf_state = None
             if volume_overlay is not None:
-                volume_conf_state = volume_overlay.state_at(
-                    asset, signal_row["ts"])
+                volume_conf_state = volume_overlay.state_for_signal(
+                    asset, ind_slice)
 
             exit_event: dict | None = None
             enter_event: dict | None = None
