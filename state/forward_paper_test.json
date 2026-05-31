@@ -1,0 +1,58 @@
+{
+  "test_id": "fwd_paper_volconf_20260531",
+  "started_at": "2026-05-31T14:35:02+00:00",
+  "config": "state/live_multiasset_long_short_funding_vol_volconf.yaml",
+  "config_sha256": "f3251be0153922bdcbf6c20ba1c753ffe7771affd5f7ca1eaa2ac6c969303b91",
+  "git_head": "9b39588f9c68dd3d87a9a5a1a539d995d048d63c",
+  "mode": "paper",
+  "assets": ["BTC/USDT", "ETH/USDT"],
+  "timeframe": "4h",
+  "overlays": {
+    "funding_filter": true,
+    "vol_sizing": true,
+    "volume_confirmation": true
+  },
+  "milestones": [10, 20, 30],
+  "trade_log_path": "state/trades.jsonl",
+  "worker_log_path": "state/forward_paper_test.log",
+  "tripwires": {
+    "pf_floor_at_or_after_10_trades": 0.8,
+    "qualitative": [
+      "major parity issue (live trade prints diverge materially from replay)",
+      "data issue (heartbeat freshness > 2 cycles, repeated NaN, stuck overlay)",
+      "execution bug (worker crash loop, position desync)"
+    ]
+  },
+  "research_expectations": {
+    "source": "research/volume_confirmation_report.md (baseline_funding_vol_plus_volume_conf walk-forward OOS)",
+    "horizons": {
+      "48mo": {"trades": 104, "pf": 5.79, "dd_pct": 1.34, "win_pct": 62.5, "ret_pct": 74.67, "ret_per_exp_pct": 135.65},
+      "24mo": {"trades": 61,  "pf": 5.97, "dd_pct": 0.98, "win_pct": 68.9, "ret_pct": 40.06, "ret_per_exp_pct": 79.46},
+      "12mo": {"trades": 29,  "pf": 8.85, "dd_pct": 0.96, "win_pct": 72.4, "ret_pct": 22.06, "ret_per_exp_pct": 37.63},
+      "6mo":  {"trades": 15,  "pf": 11.89,"dd_pct": 0.74, "win_pct": 80.0, "ret_pct": 12.31, "ret_per_exp_pct": 22.38},
+      "3mo":  {"trades": 5,   "pf": 5.64, "dd_pct": 0.74, "win_pct": 60.0, "ret_pct": 3.43,  "ret_per_exp_pct": 8.57}
+    },
+    "expected_cadence_trades_per_month": "approximately 2 (volconf branch averages ~29 trades / 12 months in OOS walk-forward); 10/20/30 trade milestones map to roughly 5 / 10 / 15 months of forward paper data"
+  },
+  "replay_baseline_3mo": {
+    "source": "scripts/replay_live.py --config state/live_multiasset_long_short_funding_vol_volconf.yaml --n-months 3 (run 2026-05-31)",
+    "trades": 4,
+    "ret_pct": -3.85,
+    "dd_pct": 3.85,
+    "win_pct": 0.0,
+    "pf": 0.00,
+    "note": "in-sample on the worst recent stretch; included as a sanity floor only, not as the success target. The 48mo/24mo/12mo walk-forward numbers above are the actual research expectations."
+  },
+  "freeze_directive": {
+    "frozen": true,
+    "no_changes_until": "30 closed trades after started_at OR severe failure tripwire (PF < 0.8 at >=10 trades, parity / data / execution failure)",
+    "scope": [
+      "no strategy modifications",
+      "no threshold tuning",
+      "no new indicators",
+      "no new overlays",
+      "no live config switch"
+    ]
+  },
+  "review_cadence": "weekly health check only — scripts/forward_test_tracker.py + scripts/monitor_strategy_decay.py"
+}
