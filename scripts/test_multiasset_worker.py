@@ -477,6 +477,104 @@ def main() -> int:
           f"got {lines_in}")
     print()
 
+    # --- 10. Funding overlay gate (Issue #21)
+    print("10. Funding overlay gate (Issue #21)")
+    from hermes_trading.multi_loop import evaluate_funding_gate
+
+    g_long_allowed = evaluate_funding_gate("long", percentile=50.0)
+    check("long allowed at p50 (mid funding)", g_long_allowed["allow"]
+          and g_long_allowed["decision"] == "allow",
+          f"got {g_long_allowed}")
+    g_long_block = evaluate_funding_gate("long", percentile=96.0)
+    check("long BLOCKED at p96 (>= 95 default)",
+          (not g_long_block["allow"]) and g_long_block["decision"] == "block_long"
+          and "extreme_positive_funding" in g_long_block["reason"],
+          f"got {g_long_block}")
+    g_long_edge = evaluate_funding_gate("long", percentile=95.0)
+    check("long BLOCKED exactly at p95 (>= boundary)",
+          (not g_long_edge["allow"]) and g_long_edge["decision"] == "block_long",
+          f"got {g_long_edge}")
+
+    g_short_allowed = evaluate_funding_gate("short", percentile=50.0)
+    check("short allowed at p50", g_short_allowed["allow"],
+          f"got {g_short_allowed}")
+    g_short_block = evaluate_funding_gate("short", percentile=2.0)
+    check("short BLOCKED at p2 (<= 5 default)",
+          (not g_short_block["allow"]) and g_short_block["decision"] == "block_short"
+          and "extreme_negative_funding" in g_short_block["reason"],
+          f"got {g_short_block}")
+    g_short_edge = evaluate_funding_gate("short", percentile=5.0)
+    check("short BLOCKED exactly at p5 (<= boundary)",
+          (not g_short_edge["allow"]) and g_short_edge["decision"] == "block_short",
+          f"got {g_short_edge}")
+
+    # Direction-aware: long not blocked at p2 (only short blocked), short not blocked at p98
+    g_long_low = evaluate_funding_gate("long", percentile=2.0)
+    check("long ALLOWED at p2 (low funding only affects shorts)",
+          g_long_low["allow"], f"got {g_long_low}")
+    g_short_high = evaluate_funding_gate("short", percentile=98.0)
+    check("short ALLOWED at p98 (high funding only affects longs)",
+          g_short_high["allow"], f"got {g_short_high}")
+
+    # Missing data: fail open by default
+    g_missing_open = evaluate_funding_gate("long", percentile=None,
+                                           on_missing_data="fail_open")
+    check("missing data + fail_open → allow + decision=missing_data",
+          g_missing_open["allow"] and g_missing_open["decision"] == "missing_data",
+          f"got {g_missing_open}")
+    g_missing_closed = evaluate_funding_gate("long", percentile=None,
+                                             on_missing_data="fail_closed")
+    check("missing data + fail_closed → block + decision=missing_data_blocked",
+          (not g_missing_closed["allow"])
+          and g_missing_closed["decision"] == "missing_data_blocked",
+          f"got {g_missing_closed}")
+
+    # Custom thresholds respected
+    g_custom_long = evaluate_funding_gate("long", percentile=85.0,
+                                          block_long_above_pct=80.0)
+    check("custom block_long_above_pct=80 respected",
+          (not g_custom_long["allow"]) and g_custom_long["decision"] == "block_long",
+          f"got {g_custom_long}")
+    g_custom_short = evaluate_funding_gate("short", percentile=12.0,
+                                           block_short_below_pct=15.0)
+    check("custom block_short_below_pct=15 respected",
+          (not g_custom_short["allow"]) and g_custom_short["decision"] == "block_short",
+          f"got {g_custom_short}")
+
+    # Config file exists and points at the long-short strategy with funding enabled
+    import yaml as _yaml
+    long_short_cfg_path = ROOT / "state" / "live_multiasset_long_short_funding.yaml"
+    check("new live config exists", long_short_cfg_path.exists(),
+          f"path={long_short_cfg_path}")
+    long_short_cfg = _yaml.safe_load(open(long_short_cfg_path))
+    check("new config: assets == [BTC/USDT, ETH/USDT]",
+          long_short_cfg["assets"] == ["BTC/USDT", "ETH/USDT"],
+          f"got {long_short_cfg.get('assets')}")
+    check("new config: strategy = strategy_supertrend_long_short.yaml",
+          long_short_cfg["strategy"] == "state/strategy_supertrend_long_short.yaml",
+          f"got {long_short_cfg.get('strategy')}")
+    check("new config: funding_filter.enabled = true",
+          long_short_cfg["funding_filter"]["enabled"] is True)
+    check("new config: block_long_above_pct = 95 (Issue #20 threshold)",
+          long_short_cfg["funding_filter"]["block_long_above_pct"] == 95.0)
+    check("new config: block_short_below_pct = 5 (Issue #20 symmetric)",
+          long_short_cfg["funding_filter"]["block_short_below_pct"] == 5.0)
+    check("new config: percentile_window_bars = 180 (30 days @ 4h)",
+          long_short_cfg["funding_filter"]["percentile_window_bars"] == 180)
+    check("new config: on_missing_data = fail_open (Issue #21 default)",
+          long_short_cfg["funding_filter"]["on_missing_data"] == "fail_open")
+
+    # Long-only fallback config still exists and is unchanged shape
+    long_only_cfg_path = ROOT / "state" / "live_multiasset.yaml"
+    check("long-only fallback config still exists", long_only_cfg_path.exists())
+    long_only_cfg = _yaml.safe_load(open(long_only_cfg_path))
+    check("long-only fallback uses long-only strategy",
+          long_only_cfg["strategy"] == "state/strategy_supertrend.yaml",
+          f"got {long_only_cfg.get('strategy')}")
+    check("long-only fallback has NO funding_filter section",
+          "funding_filter" not in long_only_cfg or not long_only_cfg.get("funding_filter"))
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:

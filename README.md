@@ -92,7 +92,14 @@ Persists open position (`state/position.json`) and reflection counter
 ### Live paper worker — multi-asset (Issue #16)
 
 ```bash
+# Long-only fallback (Issue #16 — still the default if you don't
+# explicitly choose the long-short config):
 uv run python -m hermes_trading.run --config state/live_multiasset.yaml
+
+# Adopted long-short + funding-filter candidate (Issue #21, wired from
+# the Issue #20 research adoption):
+uv run python -m hermes_trading.run \
+    --config state/live_multiasset_long_short_funding.yaml --verbose
 ```
 
 Reads `state/live_multiasset.yaml` (assets list, timeframe,

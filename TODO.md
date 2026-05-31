@@ -5,6 +5,10 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Live wiring of long-short + funding filter (Issue #21) — opt-in
+  via `state/live_multiasset_long_short_funding.yaml`. Long-only
+  fallback config untouched. Direction-aware funding gate (block long
+  ≥ p95, block short ≤ p5). 100/100 self-test invariants pass.
 - ✓ Live tick display auto-switch (Issue #17) — SuperTrend mode now
   shows SuperTrend direction / line / distance instead of RSI; legacy
   v2 display preserved byte-for-byte; `--verbose` adds RSI back for

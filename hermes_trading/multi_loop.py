@@ -30,6 +30,7 @@ import pandas as pd
 
 from . import STATE_DIR, append_jsonl, load_yaml, log, now_iso, write_json
 from . import display as display_mod
+from . import funding as funding_mod
 from . import positions
 from . import signals
 from .adapters import SchemaError, price as price_adapter
@@ -41,6 +42,123 @@ _TIMEFRAME_SECONDS = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
     "1h": 3600, "4h": 14400, "1d": 86400,
 }
+
+
+# ---------- funding overlay (Issue #21) -------------------------------------
+
+def evaluate_funding_gate(
+    direction: str,
+    percentile: float | None,
+    block_long_above_pct: float = 95.0,
+    block_short_below_pct: float = 5.0,
+    on_missing_data: str = "fail_open",
+) -> dict:
+    """Pure-function direction-aware funding gate.
+
+    Returns a dict with:
+      allow:   bool  — True means the trade may proceed
+      decision: str  — "allow" / "block_long" / "block_short" / "missing_data" / "missing_data_blocked"
+      reason:  str   — short human-readable explanation
+
+    ``on_missing_data`` is ``"fail_open"`` (default; allow + warn) or
+    ``"fail_closed"`` (block + warn). The hard rule in Issue #21 is fail
+    open by default.
+    """
+    if percentile is None:
+        if on_missing_data == "fail_closed":
+            return {"allow": False, "decision": "missing_data_blocked",
+                    "reason": "funding data missing; fail_closed"}
+        return {"allow": True, "decision": "missing_data",
+                "reason": "funding data missing; fail_open"}
+    if direction == "long":
+        if percentile >= block_long_above_pct:
+            return {"allow": False, "decision": "block_long",
+                    "reason": (f"extreme_positive_funding "
+                               f"(pct {percentile:.1f} >= {block_long_above_pct:.1f})")}
+        return {"allow": True, "decision": "allow",
+                "reason": (f"below long block threshold "
+                           f"(pct {percentile:.1f} < {block_long_above_pct:.1f})")}
+    if direction == "short":
+        if percentile <= block_short_below_pct:
+            return {"allow": False, "decision": "block_short",
+                    "reason": (f"extreme_negative_funding "
+                               f"(pct {percentile:.1f} <= {block_short_below_pct:.1f})")}
+        return {"allow": True, "decision": "allow",
+                "reason": (f"above short block threshold "
+                           f"(pct {percentile:.1f} > {block_short_below_pct:.1f})")}
+    raise ValueError(f"unknown direction: {direction!r}")
+
+
+class LiveFundingOverlay:
+    """Per-asset funding rate + rolling percentile, lookup-by-timestamp.
+
+    Loads once at worker boot via the same ``hermes_trading.funding``
+    loader used by the research scripts. The rolling percentile is
+    computed across the full available history (Binance Vision starts
+    2020-01 — comfortably long for the 180-bar window).
+
+    On per-tick lookup:
+      - Find the most recent funding observation <= ts.
+      - Return its raw rate and rolling-percentile value.
+      - If nothing is available (data not loaded, or ts before
+        earliest), return ``available=False``.
+    """
+
+    def __init__(self,
+                 assets: list[str],
+                 percentile_window_bars: int = 180,
+                 n_months_history: int = 48,
+                 timeframe: str = "4h"):
+        self.assets = assets
+        self.timeframe = timeframe
+        self.percentile_window_bars = int(percentile_window_bars)
+        self.rates: dict[str, "pd.Series | None"] = {}
+        self.percentiles: dict[str, "pd.Series | None"] = {}
+        for asset in assets:
+            sym = asset.replace("/", "")
+            try:
+                f = funding_mod.load_funding(sym, n_months=n_months_history)
+                rate_series = f["funding_rate"]
+                # rolling percentile on the 8h funding cadence
+                pct = funding_mod.rolling_percentile(
+                    rate_series, window=percentile_window_bars,
+                )
+                self.rates[asset] = rate_series
+                self.percentiles[asset] = pct
+                log(f"  funding overlay loaded for {asset}: "
+                    f"{len(rate_series)} records, "
+                    f"span {rate_series.index[0].date()} -> {rate_series.index[-1].date()}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"[yellow]funding overlay unavailable for {asset}: "
+                    f"{exc}; gate will fail open[/yellow]")
+                self.rates[asset] = None
+                self.percentiles[asset] = None
+
+    def state_at(self, asset: str, ts) -> dict:
+        """Return a dict with rate, percentile, available. ``ts`` is a
+        timezone-aware datetime / pandas.Timestamp."""
+        rates = self.rates.get(asset)
+        pcts = self.percentiles.get(asset)
+        if rates is None or pcts is None:
+            return {"available": False, "rate": None, "percentile": None}
+        try:
+            ts_pd = pd.Timestamp(ts)
+            if ts_pd.tzinfo is None:
+                ts_pd = ts_pd.tz_localize("UTC")
+            window = rates.loc[:ts_pd]
+            if window.empty:
+                return {"available": False, "rate": None, "percentile": None}
+            last_rate = float(window.iloc[-1])
+            last_pct_window = pcts.loc[:ts_pd]
+            last_pct = (float(last_pct_window.iloc[-1])
+                        if not last_pct_window.empty and not pd.isna(last_pct_window.iloc[-1])
+                        else None)
+            if last_pct is None:
+                return {"available": False, "rate": last_rate, "percentile": None}
+            return {"available": True, "rate": last_rate, "percentile": last_pct}
+        except Exception as exc:  # noqa: BLE001
+            log(f"[yellow]funding lookup failed for {asset}: {exc}[/yellow]")
+            return {"available": False, "rate": None, "percentile": None}
 
 
 # ---------- pure helpers (used by both run loop and self-test) --------------
@@ -223,6 +341,25 @@ async def run(
     log(f"  assets={assets}  timeframe={timeframe}  max_open={max_open}")
     log(f"  strategy={strategy_path}  size_per_asset={size_per_asset}")
 
+    # ---- funding overlay (Issue #21) ----
+    funding_cfg = (cfg.get("funding_filter") or {})
+    funding_enabled = bool(funding_cfg.get("enabled"))
+    funding_block_long = float(funding_cfg.get("block_long_above_pct", 95.0))
+    funding_block_short = float(funding_cfg.get("block_short_below_pct", 5.0))
+    funding_window_bars = int(funding_cfg.get("percentile_window_bars", 180))
+    funding_missing_policy = str(funding_cfg.get("on_missing_data", "fail_open"))
+    funding_overlay: LiveFundingOverlay | None = None
+    if funding_enabled:
+        log(f"  funding_filter ENABLED  "
+            f"long_block>={funding_block_long}  short_block<={funding_block_short}  "
+            f"window={funding_window_bars} bars  missing={funding_missing_policy}")
+        funding_overlay = LiveFundingOverlay(
+            assets, percentile_window_bars=funding_window_bars,
+            timeframe=timeframe,
+        )
+    else:
+        log(f"  funding_filter disabled")
+
     # One-shot legacy migration (state/position.json -> state/positions/<KEY>.json).
     # The legacy file's asset is inferred from goal.yaml; we don't try to read
     # the position dict's own asset field because old v1 entries didn't have one.
@@ -311,36 +448,124 @@ async def run(
             rsi_val = float(row["rsi"]) if pd.notna(row.get("rsi")) else None
 
             position = positions_state[asset]
+            # ---- per-bar funding state lookup (Issue #21) ----
+            funding_state = None
+            if funding_overlay is not None:
+                funding_state = funding_overlay.state_at(asset, row.get("ts"))
+
+            funding_block_message: str | None = None
+
             if position is None:
                 allowed, gate_reason = can_enter(asset, positions_state, max_open)
+                opened = False
                 if allowed:
-                    setup = signals.long_entry(row, strategy)
-                    if setup:
-                        new_pos = {
-                            "asset": asset,
-                            "entry_price": last_price,
-                            "opened_at": now_iso(),
-                            "size": size_per_asset,
-                            "direction": "long",
-                            "setup": setup,
-                            "stop": float(signals.initial_stop(row, setup, strategy)),
-                            "strategy_version": version,
-                            "entry_rsi": rsi_val,
-                        }
-                        positions_state[asset] = new_pos
-                        positions.save_position(asset, new_pos, state_dir)
-                        log(f"[green]ENTER long[/green] {asset} @ {last_price:.2f} "
-                            f"({setup}, stop={new_pos['stop']:.2f}, size={size_per_asset})")
+                    # try long first
+                    setup_l = signals.long_entry(row, strategy)
+                    if setup_l:
+                        if funding_overlay is not None:
+                            gate = evaluate_funding_gate(
+                                "long",
+                                funding_state.get("percentile") if funding_state else None,
+                                block_long_above_pct=funding_block_long,
+                                block_short_below_pct=funding_block_short,
+                                on_missing_data=funding_missing_policy,
+                            )
+                            if not gate["allow"]:
+                                funding_block_message = (
+                                    f"funding_filter {gate['decision']} "
+                                    f"({gate['reason']})"
+                                )
+                                log(f"[yellow]BLOCK long {asset} @ {last_price:.2f} "
+                                    f"({gate['reason']})[/yellow]")
+                            elif gate["decision"] == "missing_data":
+                                log(f"[yellow]funding data missing for {asset}; "
+                                    f"long allowed by fail-open policy[/yellow]")
+                            if gate["allow"]:
+                                opened = True
+                        else:
+                            opened = True
+                        if opened:
+                            new_pos = {
+                                "asset": asset,
+                                "entry_price": last_price,
+                                "opened_at": now_iso(),
+                                "size": size_per_asset,
+                                "direction": "long",
+                                "setup": setup_l,
+                                "stop": float(signals.initial_stop(row, setup_l, strategy)),
+                                "strategy_version": version,
+                                "entry_rsi": rsi_val,
+                                "funding_rate_at_entry": (
+                                    funding_state.get("rate") if funding_state else None),
+                                "funding_percentile_at_entry": (
+                                    funding_state.get("percentile") if funding_state else None),
+                            }
+                            positions_state[asset] = new_pos
+                            positions.save_position(asset, new_pos, state_dir)
+                            log(f"[green]ENTER long[/green] {asset} @ {last_price:.2f} "
+                                f"({setup_l}, stop={new_pos['stop']:.2f}, size={size_per_asset})")
+
+                    if not opened and positions_state[asset] is None:
+                        setup_s = signals.short_entry(row, strategy)
+                        if setup_s:
+                            short_ok = True
+                            if funding_overlay is not None:
+                                gate = evaluate_funding_gate(
+                                    "short",
+                                    funding_state.get("percentile") if funding_state else None,
+                                    block_long_above_pct=funding_block_long,
+                                    block_short_below_pct=funding_block_short,
+                                    on_missing_data=funding_missing_policy,
+                                )
+                                if not gate["allow"]:
+                                    short_ok = False
+                                    funding_block_message = (
+                                        f"funding_filter {gate['decision']} "
+                                        f"({gate['reason']})"
+                                    )
+                                    log(f"[yellow]BLOCK short {asset} @ {last_price:.2f} "
+                                        f"({gate['reason']})[/yellow]")
+                                elif gate["decision"] == "missing_data":
+                                    log(f"[yellow]funding data missing for {asset}; "
+                                        f"short allowed by fail-open policy[/yellow]")
+                            if short_ok:
+                                new_pos = {
+                                    "asset": asset,
+                                    "entry_price": last_price,
+                                    "opened_at": now_iso(),
+                                    "size": size_per_asset,
+                                    "direction": "short",
+                                    "setup": setup_s,
+                                    "stop": float(signals.initial_stop_short(row, setup_s, strategy)),
+                                    "strategy_version": version,
+                                    "entry_rsi": rsi_val,
+                                    "funding_rate_at_entry": (
+                                        funding_state.get("rate") if funding_state else None),
+                                    "funding_percentile_at_entry": (
+                                        funding_state.get("percentile") if funding_state else None),
+                                }
+                                positions_state[asset] = new_pos
+                                positions.save_position(asset, new_pos, state_dir)
+                                log(f"[red]ENTER short[/red] {asset} @ {last_price:.2f} "
+                                    f"({setup_s}, stop={new_pos['stop']:.2f}, size={size_per_asset})")
             else:
                 bars_held = int((pd.Timestamp.now(tz="UTC") -
                                  pd.Timestamp(position["opened_at"])).total_seconds()
                                 / sec_per_bar)
-                reason = signals.long_exit(row, position, strategy, bars_held)
+                direction = position.get("direction", "long")
+                if direction == "long":
+                    reason = signals.long_exit(row, position, strategy, bars_held)
+                else:
+                    reason = signals.short_exit(row, position, strategy, bars_held)
                 if reason:
                     trade = build_trade_row(asset, position, last_price,
                                             reason, bars_held, version)
+                    # carry funding-at-entry metadata onto the closed-trade row
+                    if "funding_rate_at_entry" in position:
+                        trade["funding_rate_at_entry"] = position["funding_rate_at_entry"]
+                        trade["funding_percentile_at_entry"] = position.get("funding_percentile_at_entry")
                     append_jsonl(state_dir / "trades.jsonl", trade)
-                    log(f"[cyan]EXIT long[/cyan] {asset} @ {last_price:.2f} "
+                    log(f"[cyan]EXIT {direction}[/cyan] {asset} @ {last_price:.2f} "
                         f"({reason}, return={trade['net_return_pct']:+.4f})")
                     realized_pnl_pct += trade["net_return_pct"] * 100.0
                     positions_state[asset] = None
@@ -381,6 +606,38 @@ async def run(
             except (TypeError, ValueError):
                 bullish_regime_ok = None
             asset_hb["bullish_regime"] = bullish_regime_ok
+            # Issue #21: funding overlay heartbeat block
+            asset_hb["funding_filter_enabled"] = funding_enabled
+            if funding_overlay is not None:
+                if funding_state and funding_state.get("available"):
+                    rate = funding_state.get("rate")
+                    pct = funding_state.get("percentile")
+                    # The eventual entry direction is unknown at heartbeat
+                    # time (depends on whether a long or short signal would
+                    # fire). For the heartbeat we report the gate decision
+                    # FOR THE CURRENT ABSOLUTE-FUNDING EXTREMES — i.e. what
+                    # would be blocked if a signal fired right now.
+                    if pct is not None and pct >= funding_block_long:
+                        decision = "block_long"
+                        reason = (f"extreme_positive_funding "
+                                  f"(pct {pct:.1f} >= {funding_block_long:.1f})")
+                    elif pct is not None and pct <= funding_block_short:
+                        decision = "block_short"
+                        reason = (f"extreme_negative_funding "
+                                  f"(pct {pct:.1f} <= {funding_block_short:.1f})")
+                    else:
+                        decision = "allow"
+                        reason = "below long block threshold"
+                    asset_hb["funding_rate"] = rate
+                    asset_hb["funding_percentile"] = pct
+                    asset_hb["funding_decision"] = decision
+                    asset_hb["funding_reason"] = reason
+                else:
+                    asset_hb["funding_rate"] = None
+                    asset_hb["funding_percentile"] = None
+                    asset_hb["funding_decision"] = "missing_data"
+                    asset_hb["funding_reason"] = ("funding data unavailable; "
+                                                  "fail-open policy")
             per_asset_hb[asset] = asset_hb
             asset_row_for_display[asset] = {
                 "close": last_price,
@@ -392,6 +649,8 @@ async def run(
                 "ema_slow": es,
                 "position": cur_pos,
                 "raw_row": row,
+                "funding_state": funding_state,
+                "funding_blocked_message": funding_block_message,
             }
 
         if assets and len(broken) == len(assets):
@@ -446,6 +705,25 @@ async def run(
                     )
                     for line in display_mod.format_entry_diagnostic_lines(diag):
                         log(line)
+                    # Issue #21 — funding overlay verbose line
+                    if funding_overlay is not None:
+                        fs = disp.get("funding_state")
+                        if fs and fs.get("available"):
+                            rate = fs.get("rate")
+                            pct = fs.get("percentile")
+                            # mirror the heartbeat decision
+                            if pct is not None and pct >= funding_block_long:
+                                fdec = "block_long"
+                            elif pct is not None and pct <= funding_block_short:
+                                fdec = "block_short"
+                            else:
+                                fdec = "allow"
+                            log(f"  funding: rate={rate*100:+.4f}% "
+                                f"pct={pct:.1f} decision={fdec}")
+                        else:
+                            log(f"  funding: data unavailable; fail-open")
+                    if disp.get("funding_blocked_message"):
+                        log(f"  blocked_by: {disp['funding_blocked_message']}")
             log(f"portfolio open={open_count}/{max_open}  "
                 f"realized={realized_pnl_pct:+.3f}%  "
                 f"unrealized={unrl_portfolio*100:+.3f}%")

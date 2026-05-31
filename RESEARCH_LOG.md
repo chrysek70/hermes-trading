@@ -433,6 +433,56 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Live wiring of long-short + funding filter (Issue #21) — shipped
+
+The Issue #20 adopted research candidate (`btc_eth_long_short_funding_filter`,
+PF 3.35, DD 4.64%, +139.71% return, 123 trades) is now wired into the
+multi-asset paper worker as an **opt-in** config. The long-only
+`state/live_multiasset.yaml` is unchanged and remains the default
+fallback.
+
+Architecture:
+
+- New config `state/live_multiasset_long_short_funding.yaml` points
+  at `state/strategy_supertrend_long_short.yaml` and enables the
+  `funding_filter` block (exact Issue #20 thresholds: block long ≥ p95,
+  block short ≤ p5, 180-bar rolling window, fail-open on missing data).
+- New `LiveFundingOverlay` class in `multi_loop.py` loads per-asset
+  funding histories at boot (via the existing
+  `hermes_trading.funding` loader — same Binance Vision data path
+  as Issue #7 research). Computes a rolling-window percentile series
+  per asset and looks up the current funding state by timestamp on
+  every tick.
+- New pure-function `evaluate_funding_gate(direction, percentile, ...)`
+  decides allow / block_long / block_short / missing_data /
+  missing_data_blocked. Direction-aware: long blocked at high
+  percentile, short blocked at low percentile. The self-test
+  exercises every branch.
+- Heartbeat per asset gains `funding_filter_enabled`, `funding_rate`,
+  `funding_percentile`, `funding_decision`, `funding_reason`.
+- Trade rows gain `funding_rate_at_entry` and
+  `funding_percentile_at_entry` (kept alongside legacy fields —
+  decay monitor unaffected).
+- Verbose mode prints `funding: rate=... pct=... decision=...`
+  and `blocked_by: funding_filter extreme_positive_funding` when
+  a signal is gated.
+
+Multi-asset worker also gains symmetric short-entry handling in
+`multi_loop`. Previously the orchestration only fired longs; now
+the long-short strategy yaml's short side is honoured by routing
+through `signals.short_entry` / `signals.short_exit` /
+`signals.initial_stop_short` (each of those gained SuperTrend short
+branches in Issue #19).
+
+Operational rule: the live worker is **not auto-switched**. The
+user explicitly chooses which config to run. See README for the
+exact commands.
+
+Self-test extended from 69 to 100 unique invariants (added 31 new
+checks covering every funding-gate branch, missing-data policies,
+custom thresholds, and verification that the long-only fallback
+config is untouched). Decay monitor unaffected — 14/14 still pass.
+
 ## BTC/ETH long-short + overlay sweep (Issue #20) — funding filter ADOPTED
 
 Issue #19's long-short variant missed the DD gate by 0.22 pp (5.76% vs

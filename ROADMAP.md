@@ -93,6 +93,15 @@ without tuning the failed one.
    no Slack / Datadog integration (deliberate; both are easy to add
    later via exit code or JSON output). See `research/decay_monitor_report.md`.
 
+1c. **Adopted long-short + funding-filter wired into live (Issue #21) — SHIPPED.**
+   The Issue #20 adopted research candidate
+   (`btc_eth_long_short_funding_filter`) is now opt-in via
+   `state/live_multiasset_long_short_funding.yaml`. The long-only
+   `state/live_multiasset.yaml` remains the default fallback,
+   byte-for-byte unchanged. Funding overlay is direction-aware (block
+   long at p95+, block short at p≤5, fail-open on missing data per
+   Issue #21 spec). User explicitly chooses which config to run.
+
 1b. **Multi-asset live paper worker — SHIPPED (Issue #16).**
    `--config state/live_multiasset.yaml` runs BTC/USDT + ETH/USDT in
    parallel paper mode. New module `hermes_trading/multi_loop.py`

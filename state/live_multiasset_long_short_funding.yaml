@@ -1,0 +1,49 @@
+# Multi-asset live (paper) config wiring the Issue #20 adopted research
+# candidate:
+#     btc_eth_long_short_funding_filter
+#
+# This config is OPT-IN. It does NOT replace state/live_multiasset.yaml,
+# which remains the long-only fallback. Switch to this config explicitly:
+#
+#     uv run python -m hermes_trading.run \
+#         --config state/live_multiasset_long_short_funding.yaml --verbose
+#
+# Fall back to long-only at any time by passing the original config:
+#
+#     uv run python -m hermes_trading.run \
+#         --config state/live_multiasset.yaml
+#
+# Locked parameters (from Issue #20). DO NOT tune without a new
+# experiment + adoption gate:
+
+assets:
+  - BTC/USDT
+  - ETH/USDT
+
+timeframe: 4h
+poll_seconds: 10
+indicator_limit: 300        # bars per fetch (EMA200 needs ~200)
+max_open_positions: 2
+
+# Long-short SuperTrend(10, 3). The research yaml turns on
+# shorts.enabled AND shorts.supertrend.enabled. Long-side parameters
+# unchanged from the original long-only yaml.
+strategy: state/strategy_supertrend_long_short.yaml
+
+size_per_asset: 0.5
+circuit_break_after: 5
+heartbeat_schema: "multiasset-v2"   # bumped — adds funding fields
+
+# Direction-aware funding filter, exact thresholds from Issue #20:
+#   - Long entries blocked when funding percentile rank >= block_long_above_pct
+#     (extreme positive funding -> longs overheated)
+#   - Short entries blocked when funding percentile rank <= block_short_below_pct
+#     (extreme negative funding -> squeeze setup, bad for shorts)
+# Percentile is computed over a rolling 30-day window (180 4h bars).
+# Same loader and same Binance Vision data path as Issue #7 research.
+funding_filter:
+  enabled: true
+  block_long_above_pct: 95.0
+  block_short_below_pct: 5.0
+  percentile_window_bars: 180
+  on_missing_data: fail_open     # default: allow the trade and log a warning
