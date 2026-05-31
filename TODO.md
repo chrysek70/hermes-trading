@@ -5,6 +5,12 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Alpha / Risk / Execution architecture map (Issue #25) —
+  `ARCHITECTURE.md` codifies the layered design;
+  `research/alpha_risk_execution_audit.md` classifies every
+  existing module; backlogs in `ROADMAP.md` organised by layer;
+  `state/examples/` holds non-loadable templates. Documentation
+  only; no code changes.
 - ✓ Live signal parity fix (Issue #24) — entries and SuperTrend flip
   exits now evaluate on the most recent CLOSED candle. Display and
   intra-bar stop monitoring keep using the current in-progress

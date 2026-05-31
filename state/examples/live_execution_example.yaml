@@ -1,0 +1,80 @@
+# EXECUTION layer example — live multi-asset config template.
+#
+# This file is NOT loaded by the live worker. It documents the shape
+# of a real multi-asset live config. The two configs that the worker
+# actually reads are:
+#
+#   state/live_multiasset.yaml                       (long-only fallback)
+#   state/live_multiasset_long_short_funding.yaml    (adopted candidate)
+#
+# Pass one of those via --config, never an example yaml.
+
+# ---- Asset universe ----
+# The execution layer iterates over this list every poll. Each asset
+# gets its own indicator frame, its own position state file
+# (state/positions/<KEY>.json), and its own heartbeat block. Funding
+# rate history is loaded per asset at boot.
+assets:
+  - BTC/USDT
+  - ETH/USDT
+
+# ---- Decision timeframe ----
+# Determines bar size for indicator computation. Issue #24 made
+# entries / SuperTrend flip exits evaluate on the most recent CLOSED
+# bar at this timeframe. Stops still react intra-bar via display_row
+# low / high.
+timeframe: 4h
+
+# ---- Polling cadence ----
+# How often the worker fetches OHLCV from the price adapter. Inside
+# a single 4h bar there are ~1440 polls; the entry / flip decision
+# uses the same closed-bar value at each one (no re-firing).
+poll_seconds: 10
+
+# ---- Indicator warm-up ----
+# Bars to fetch per OHLCV call. EMA200 needs ~200 bars to stabilise;
+# 300 leaves headroom for SuperTrend's 10-bar warmup on top.
+indicator_limit: 300
+
+# ---- Portfolio cap (Risk-layer concept, executed here) ----
+max_open_positions: 2
+
+# ---- Alpha layer file (Risk overlays inside it count too) ----
+strategy: state/strategy_supertrend_long_short.yaml
+
+# ---- Per-asset weight (Risk-layer concept, executed here) ----
+size_per_asset: 0.5
+
+# ---- Failure isolation ----
+# A single asset that fails this many consecutive fetches is marked
+# broken and skipped for the rest of the session. The worker only
+# halts when EVERY asset is broken.
+circuit_break_after: 5
+
+# ---- Heartbeat schema version ----
+# Bump only when the structure of state/heartbeat.json changes in a
+# way that breaks external consumers. multiasset-v2 added funding
+# fields (Issue #21) and SuperTrend display fields (Issue #17).
+heartbeat_schema: "multiasset-v2"
+
+# ---- Risk overlay activation (read directly by the execution loop) ----
+# When enabled, hermes_trading/multi_loop.py loads
+# hermes_trading.funding for each asset at boot and gates entries
+# per the thresholds in risk_overlay_example.yaml.
+funding_filter:
+  enabled: true
+  block_long_above_pct: 95.0
+  block_short_below_pct: 5.0
+  percentile_window_bars: 180
+  on_missing_data: fail_open
+
+# ---- Future fields (NOT YET IMPLEMENTED — listed for layer clarity) ----
+# These would belong here once the execution backlog ships:
+#
+# slippage_model:
+#   per_side_bps: 5                 # match research backtest semantics
+# market_hours:
+#   exchange: 24x7                  # future: nyse, nasdaq
+# broker:
+#   adapter: paper                  # future: kraken_writes, ibkr, ...
+# decay_alarm_listen: true          # read the diagnostics-layer alarm

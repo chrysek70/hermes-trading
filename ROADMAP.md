@@ -3,6 +3,65 @@
 Snapshot of where the research stands, what's been tried, and what's
 queued next. Updated as experiments complete.
 
+## Alpha / Risk / Execution Roadmap
+
+The bot is layered as **Alpha → Risk → Execution → Diagnostics →
+Research feedback** (see `ARCHITECTURE.md`). Backlogs below are
+grouped by layer so it's clear where each future experiment fits.
+
+### Alpha backlog
+
+- Multi-timeframe SuperTrend confidence score (4h + 1d agreement).
+- 9 / 21 EMA exit experiment (variant on the existing SuperTrend
+  exit; alternative trailing rule).
+- Volatility-compression breakout setup (Phase-3 audit flagged the
+  `med-low` ATR bucket at PF 2.84 on the v2 strategy).
+- Factor-style crypto features: momentum, carry, basis.
+- Cointegration / pairs research if the universe grows beyond
+  BTC + ETH.
+
+### Risk backlog
+
+- HMM as sizing instead of hard filter (currently Issue #6 used
+  bimodal sizing → degenerated to filter; explicit half-size band
+  worth testing on the long-short universe).
+- Volatility targeting (resize per asset by realised vol → smoother
+  equity curve; expected to reduce DD without hurting PF).
+- Dynamic exposure caps (lower `max_open_positions` during
+  high-vol regimes).
+- Drawdown-based decay-monitor → automatic exposure reduction
+  alarm (currently report-only).
+- Funding + HMM redundancy test (Issue #20 noted both attack the
+  same regime concept; an explicit stacked vs single comparison
+  on the long-short variant would settle redundancy).
+
+### Execution backlog
+
+- **Live paper-fill quality audit** — backtest models entry +
+  exit slippage; live worker simulates fills at the bar's close
+  with no slippage / fee deduction. Live paper PnL overstates
+  net edge by ~25 bps per round-trip vs the research numbers.
+  Top of the execution backlog.
+- Slippage model improvements (per-asset, time-of-day,
+  liquidity-aware).
+- Exchange / broker abstraction (if real-money trading is ever
+  considered; explicit user authorization required first).
+- Market-hours abstraction for future stock-market support
+  (currently 24/7 assumption hard-coded).
+- Timezone handling for market vs user display (Issue #22 set the
+  scaffold — `"market"` mode reserved in `DISPLAY_TIME_MODES`).
+
+### Diagnostics backlog
+
+- Daily status report (decay monitor + heartbeat + last-7-days
+  closed trades → readable summary).
+- Weekly strategy health report.
+- Persistent "no-trade explanation" summary so the user can ask
+  "why didn't the bot trade today?" without re-running in verbose.
+- Multi-asset replay for the adopted live config (Issue #26).
+
+
+
 ## Current baseline
 
 Walk-forward OOS on BTC/USDT 4h, 24 months, fees 10 bps/side + 5 bps

@@ -433,6 +433,60 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Alpha / Risk / Execution architecture map (Issue #25) — documentation
+
+Created `ARCHITECTURE.md` and `research/alpha_risk_execution_audit.md`
+to integrate the canonical quant-shop layering (Alpha → Risk →
+Execution → Diagnostics → Research) into the project. Every existing
+module classified into the appropriate layer. Key clarifications:
+
+- **Markov / HMM models belong in the Risk layer** — they estimate
+  when a strategy should be trusted and how exposure should be
+  sized. They do not decide direction.
+- **Funding filter belongs in the Risk layer** for the same reason
+  — direction is decided by the SuperTrend flip; funding decides
+  whether that direction is permitted at the current extreme.
+- **RS belongs in the Risk layer** — RS scales an existing alpha
+  signal; it does not produce direction.
+
+A new "Alpha / Risk / Execution Roadmap" section was added to
+`ROADMAP.md`. Backlogs organised by layer:
+
+- **Alpha**: multi-TF SuperTrend confidence, 9/21 EMA exit,
+  volatility-compression breakout, factor features, cointegration
+  if the universe grows.
+- **Risk**: HMM as half-size band (not just filter), volatility
+  targeting, dynamic exposure caps, decay-monitor → exposure
+  alarm, HMM + funding redundancy test.
+- **Execution**: live paper-fill quality audit (current largest
+  gap — backtest models slippage, live doesn't), slippage model,
+  broker / market-hours / timezone abstractions for any future
+  real-money or stock-market support.
+- **Diagnostics**: daily / weekly health reports, no-trade
+  explanation summary, multi-asset replay (Issue #26).
+
+Phase 4 added `state/examples/` with three template yamls
+(`alpha_signal_example.yaml`, `risk_overlay_example.yaml`,
+`live_execution_example.yaml`) — examples only, not loaded by the
+worker. They show how each layer's config keys map to the
+architecture.
+
+Phase 5 final report in `research/alpha_risk_execution_report.md`
+answers the 9 spec questions and codifies the layering invariants:
+
+1. Alpha never reads from Risk overlays.
+2. Risk never produces a direction.
+3. Execution never reads strategy parameters except via yaml.
+4. Diagnostics never modify state.
+5. Research never touches `state/live_*.yaml` directly.
+
+No code changes. `py_compile hermes_trading/*.py scripts/*.py` OK.
+137/137 self-test still passes. 14/14 decay monitor still passes.
+
+This is documentation + architecture scaffold only. The next
+issue (#26) will start applying the architecture by upgrading
+replay mode to consume the multi-asset live config.
+
 ## Live signal parity fix (Issue #24) — shipped
 
 Audit on Issue #23 identified one material live-vs-backtest drift:

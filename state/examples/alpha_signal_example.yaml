@@ -1,0 +1,77 @@
+# ALPHA layer example — strategy yaml template.
+#
+# This file is NOT loaded by the live worker. It documents the shape
+# of a strategy yaml so you can see how every Alpha-layer concept
+# maps onto a config key. See ARCHITECTURE.md for the layered design.
+#
+# In the live system the adopted alpha config is one of:
+#   - state/strategy_supertrend.yaml             (long-only)
+#   - state/strategy_supertrend_long_short.yaml  (long + symmetric short)
+
+version: "alpha-example-01"
+schema: "v2-long-short-supertrend"
+
+# RSI is computed for diagnostics even when no setup gates on it.
+# (Issue #17 demoted RSI from the headline tick line because it
+#  was misleading when SuperTrend was the active setup.)
+rsi_period: 14
+
+# Trend regime gate. Sits inside the Alpha layer because "a SuperTrend
+# flip in the wrong regime is not a signal at all" — the regime is
+# part of the signal definition, not a risk overlay.
+regime:
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+
+setups:
+  # Each setup block carries its own enabled flag, parameters, and exit
+  # rule. Only enabled setups produce entries. The check order in
+  # signals.long_entry is supertrend → donchian → pullback → breakout
+  # — the first one to fire wins.
+
+  pullback:
+    enabled: false                # disabled in the adopted live config
+    rsi_threshold: 32             # long below this RSI
+    pullback_ema: 21
+    ema_tol: 0.002
+    exit:
+      type: mean_revert
+      target_rsi: 55
+      stop_atr_mult: 1.2
+
+  breakout:
+    enabled: false                # disabled in the adopted live config
+    require_above_vwap: true
+    ignition_atr_mult: 1.0
+    exit:
+      type: trail
+      trail_ema: 21
+      stop_atr_mult: 1.5
+
+  supertrend:
+    enabled: true                 # the adopted alpha setup
+    period: 10
+    multiplier: 3.0
+    max_holding_bars: 0           # 0 = let the indicator's flip do the work
+
+# Short side. shorts.enabled is the top-level toggle; shorts.supertrend
+# is the per-setup toggle. The long-only fallback config has BOTH off;
+# the long-short research / adopted config has BOTH on.
+shorts:
+  enabled: false
+  supertrend:
+    enabled: false
+  pullback:
+    enabled: false
+  breakout:
+    enabled: false
+
+# Position size *baseline*. The risk layer multiplies this by overlay
+# size multipliers (HMM / funding / RS) at decision time. The execution
+# layer further multiplies it by the per-asset weight (size_per_asset
+# in the live multi-asset config) when running parallel portfolio mode.
+risk:
+  atr_period: 14
+  position_size_r: 0.5
+  max_hold_bars: 240
+  regime_flip_exit: false          # SuperTrend handles regime via the flip

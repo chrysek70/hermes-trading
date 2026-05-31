@@ -1,0 +1,89 @@
+# RISK layer example — overlay config template.
+#
+# This file is NOT loaded by the live worker. It documents the shape
+# of every Risk-layer overlay so future contributors can see how to
+# express "block this signal" / "size this signal down" / "abort this
+# trade" without modifying alpha or execution.
+#
+# Risk overlays read the alpha layer's signal and either:
+#   - allow it (default)
+#   - size it down (multiplier in [0, 1])
+#   - block it entirely
+#
+# They never produce a direction. Direction is decided by the alpha
+# layer (the SuperTrend flip + regime gate).
+
+# ---- Funding filter ----
+# Direction-aware. Long entries blocked at high funding (overheated
+# longs); short entries blocked at low funding (squeeze risk). The
+# adopted live overlay uses these EXACT thresholds from Issue #20 — do
+# not edit them without a new experiment + adoption gate.
+#
+# This block, when set on a multi-asset live config, is consumed by
+# hermes_trading/multi_loop.LiveFundingOverlay.
+funding_filter:
+  enabled: true
+  block_long_above_pct: 95.0       # long blocked when funding pct >= 95
+  block_short_below_pct: 5.0       # short blocked when funding pct <= 5
+  percentile_window_bars: 180      # rolling 30 days at 4h
+  on_missing_data: fail_open       # 'fail_open' or 'fail_closed'
+
+# ---- HMM regime overlay (research-only — NOT wired into live yet) ----
+# 2-state Gaussian HMM fit per fold on causal features. Maps states to
+# {favorable, adverse} using vol-based fallback when train trades are
+# sparse. Filter mode blocks entries in the adverse state; sizing mode
+# scales the trade by P(favorable).
+#
+# Consumed by scripts/run_hmm_regime.py and
+# scripts/run_long_short_overlays.py. Not yet read by multi_loop.
+hmm_regime:
+  enabled: false                    # research-only at the moment
+  n_states: 2
+  covariance_type: full
+  n_iter: 200
+  random_state: 42
+  features:
+    - log_return
+    - realized_vol_24
+    - atr_pct
+    - ema50_slope
+    - supertrend_distance_pct
+  sizing:
+    favorable_prob_full: 0.70
+    favorable_prob_half: 0.55
+    adverse_prob_block: 0.70
+    min_size: 0.0
+    half_size: 0.5
+    full_size: 1.0
+  min_trades_for_setup_mapping: 5
+
+# ---- BTC/ETH relative-strength overlay (research-only) ----
+# Direction-aware on the long-short variant (Issue #20): long side of
+# an asset uses that asset's own RS decision; short side uses the
+# other asset's decision. Implemented in
+# hermes_trading/relative_strength.py.
+relative_strength:
+  enabled: false                    # research-only
+  asset: ETH/USDT                   # context asset
+  timeframe: 4h
+  lookback_bars: 30
+  ratio_ema: 30
+  min_btc_minus_eth_return: 0.0
+  require_ratio_above_ema: true
+
+# ---- Portfolio-level risk controls (consumed by multi_loop) ----
+# These live in the live multi-asset config (live_execution_example.yaml)
+# but are logically Risk-layer concepts. Documented here for reference.
+portfolio_risk:
+  max_open_positions: 2            # caps concurrent positions across assets
+  size_per_asset: 0.5              # per-asset weight; total <= 1.0 is unleveraged
+
+# ---- Decay alarm (NOT YET IMPLEMENTED — Roadmap item) ----
+# When implemented, the decay monitor (scripts/monitor_strategy_decay.py)
+# would write a status flag that this risk overlay could read to
+# automatically lower exposure when live performance drifts below the
+# research baseline. Today the monitor only reports.
+decay_alarm:
+  enabled: false                    # not implemented in this issue
+  scale_down_at_status: "DEGRADED"
+  scale_to: 0.5

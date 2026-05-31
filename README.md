@@ -1,6 +1,13 @@
 # hermes-trading
 
 A personal research framework for crypto paper-trading on BTC/USDT.
+
+> **Architecture:** the bot is layered as **Alpha → Risk → Execution →
+> Diagnostics → Research feedback**. See [`ARCHITECTURE.md`](ARCHITECTURE.md)
+> for the layer-by-layer map of every component, and the
+> "Alpha / Risk / Execution Roadmap" section in
+> [`ROADMAP.md`](ROADMAP.md) for backlogs grouped by layer.
+
 Paper-mode only — no real funds, no exchange writes. The repo is a sandbox
 for evaluating multi-signal strategies, regime-aware exposure control, and
 walk-forward validation discipline on a single asset.
