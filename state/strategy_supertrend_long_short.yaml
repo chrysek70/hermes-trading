@@ -1,0 +1,66 @@
+# SuperTrend(10, 3) trend-following — long-only PLUS optional short side.
+#
+# RESEARCH CONFIG ONLY (Issue #19). The live multi-asset worker
+# (state/live_multiasset.yaml) deliberately points at the
+# long-only state/strategy_supertrend.yaml; shorts stay off in
+# live until the backtest comparison passes and the user
+# explicitly approves.
+#
+# Hard rules locked at experiment start:
+#   - SuperTrend (10, 3) unchanged from Issue #4 / #11.
+#   - Walk-forward OOS only.
+#   - Adoption requires beating the current BTC/ETH parallel
+#     long-only result:
+#         PF > 2.50  AND  DD <= 5.54%
+#         return > 39.72%  AND  trades >= 65
+
+version: "v3-supertrend-long-short-01"
+schema: "v2-long-short-supertrend"
+rsi_period: 14
+
+regime:
+  trend_ema_fast: 50
+  trend_ema_slow: 200
+
+setups:
+  pullback:
+    enabled: false
+    rsi_threshold: 32
+    pullback_ema: 21
+    ema_tol: 0.002
+    exit:
+      type: mean_revert
+      target_rsi: 55
+      stop_atr_mult: 1.2
+  breakout:
+    enabled: false
+    require_above_vwap: true
+    ignition_atr_mult: 1.0
+    exit:
+      type: trail
+      trail_ema: 21
+      stop_atr_mult: 1.5
+  supertrend:
+    enabled: true
+    period: 10
+    multiplier: 3.0
+    max_holding_bars: 0
+
+# Shorts ENABLED for this research yaml. The supertrend sub-block
+# toggles the SuperTrend short specifically; pullback / breakout
+# short legs stay off so this experiment only measures the
+# SuperTrend short addition.
+shorts:
+  enabled: true
+  supertrend:
+    enabled: true
+  pullback:
+    enabled: false
+  breakout:
+    enabled: false
+
+risk:
+  atr_period: 14
+  position_size_r: 0.5
+  max_hold_bars: 240
+  regime_flip_exit: false   # SuperTrend handles its own regime via the flip

@@ -281,6 +281,19 @@ def short_entry(row: pd.Series, strategy: dict) -> str | None:
     if not _bearish_regime(row):
         return None
 
+    # SuperTrend short (Issue #19) — mirror of the long path. Fires only
+    # on bearish direction FLIPS (prev=+1, current=-1) and only when both
+    # the base SuperTrend setup is enabled AND the shorts.supertrend
+    # toggle is on. Keeps the legacy pullback / breakout shorts intact.
+    setups_st = (strategy.get("setups") or {}).get("supertrend") or {}
+    shorts_st = shorts_cfg.get("supertrend") or {}
+    if shorts_st.get("enabled", False) and setups_st.get("enabled", False):
+        cur = row.get("supertrend_direction")
+        prev = row.get("supertrend_direction_prev")
+        if pd.notna(cur) and pd.notna(prev):
+            if int(cur) == -1 and int(prev) == 1:
+                return "supertrend_short"
+
     pull = shorts_cfg.get("pullback", {})
     if pull.get("enabled", True):
         near_pull_ema = row["close"] >= row["ema_pull"] * (1.0 - float(pull.get("ema_tol", 0.002)))
@@ -299,6 +312,14 @@ def short_entry(row: pd.Series, strategy: dict) -> str | None:
 
 def initial_stop_short(row: pd.Series, setup: str, strategy: dict) -> float:
     """Stop sits ABOVE entry for a short."""
+    if setup == "supertrend_short":
+        # The SuperTrend line at entry IS the stop. In a fresh DOWN regime
+        # the line is the upper band, sitting above price. Falls back to a
+        # wide ATR stop if the indicator is somehow NaN at entry.
+        line = row.get("supertrend_line")
+        if pd.notna(line):
+            return float(line)
+        return float(row["close"] + 3.0 * row["atr"])
     key = setup.replace("_short", "")  # 'breakout_short' -> 'breakout'
     mult = float(strategy["shorts"][key]["exit"].get("stop_atr_mult", 1.5))
     return float(row["close"] + mult * row["atr"])
@@ -307,6 +328,25 @@ def initial_stop_short(row: pd.Series, setup: str, strategy: dict) -> float:
 def short_exit(row: pd.Series, position: dict, strategy: dict, bars_held: int) -> str | None:
     """Mirror of long_exit, with inverted comparisons (stop above, trail above)."""
     risk = strategy["risk"]
+
+    # SuperTrend short setup (Issue #19): the indicator's line IS the
+    # exit. Ratchet stop DOWN as the line falls, exit on bullish flip.
+    if position["setup"] == "supertrend_short":
+        st_cfg = strategy["setups"]["supertrend"]
+        line = row.get("supertrend_line")
+        if pd.notna(line):
+            line_val = float(line)
+            if line_val < position["stop"]:
+                position["stop"] = line_val
+        if row["high"] >= position["stop"]:
+            return "stop"
+        cur = row.get("supertrend_direction")
+        if pd.notna(cur) and int(cur) == 1:
+            return "supertrend_flip"
+        max_hold = int(st_cfg.get("max_holding_bars", 0) or 0)
+        if max_hold > 0 and bars_held >= max_hold:
+            return "supertrend_time_stop"
+        return None
 
     if row["high"] >= position["stop"]:
         return "stop"

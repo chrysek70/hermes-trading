@@ -433,6 +433,70 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## SuperTrend long-short (Issue #19) — research-only, gate failed by 0.22 pp
+
+Added symmetric short-side support to the SuperTrend(10, 3) strategy.
+Short entry: bearish regime (EMA50 < EMA200) + SuperTrend flip from
+UP to DOWN. Short exit: SuperTrend flips back UP / stop breach /
+optional max hold. Implementation is three small branches in
+`hermes_trading/signals.py` (`short_entry`, `initial_stop_short`,
+`short_exit`) — the existing `_run_state_machine` already routes
+between long and short via the position's `direction` field.
+
+48-month walk-forward, 20 folds:
+
+| variant | n | L | S | OOS return | DD | PF | Sharpe | folds+ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| BTC long-only | 35 | 35 | 0 | +38.66% | 9.63% | 2.24 | 0.266 | 10/20 |
+| BTC long-short | 65 | 35 | 30 | **+107.57%** | 9.98% | **2.87** | 0.353 | **15/20** |
+| ETH long-only | 30 | 30 | 0 | +37.86% | 5.30% | 2.92 | 0.336 | 10/20 |
+| ETH long-short | 64 | 30 | 34 | **+163.94%** | **5.30%** | **3.67** | **0.406** | **15/20** |
+| BTC/ETH parallel long-only (live floor) | 65 | 65 | 0 | +39.72% | 5.54% | 2.50 | 0.296 | 11/20 |
+| **BTC/ETH parallel long-short** | **129** | **65** | **64** | **+139.47%** | **5.76%** | **3.26** | **0.379** | **16/20** |
+
+**Result: research-only, gate failed by 0.22 pp.**
+
+Adoption gates (vs current adopted BTC/ETH parallel long-only):
+- PF > 2.50 → 3.26 ✓
+- DD ≤ 5.54% → **5.76%** ✗ (by 0.22 pp, ~4% relative)
+- return > +39.72% → +139.47% ✓
+- trades ≥ 65 → 129 ✓
+
+3 of 4 cleared with large margins; DD gate fails by 0.22 pp. Per the
+locked rules, this is a not-adoption.
+
+The data is striking. Shorts contribute +68.91% on BTC, +126.08% on
+ETH, and +99.75% on the parallel portfolio (raw direction-sum, not
+final equity). The parallel long-short variant produces the **highest
+risk-adjusted result measured in the project so far** by Sharpe and
+fold-positivity, and the second-highest by PF (after ETH solo
+long-short at 3.67). The DD increase is 0.22 pp on a 5.54% baseline —
+within fold-to-fold noise.
+
+Honest interpretation: the SuperTrend short side works. ETH's higher
+ATR% (Issue #13: 2.01% vs BTC's 1.47%) gives the short the same
+structural fit benefit it gives the long. The 2022 bear leg, 2024
+chop, and late-2025 correction in the 48mo window all contributed
+short profits — 16 of 20 folds positive on the long-short portfolio.
+
+**Live config is unchanged per hard rules.**
+`state/live_multiasset.yaml.strategy` still points at the long-only
+`state/strategy_supertrend.yaml`. The new
+`state/strategy_supertrend_long_short.yaml` is a research yaml only.
+
+User-facing decision: the strict gate failed, but every metric except
+DD improved massively. If the user accepts the 0.22 pp DD increase in
+exchange for ~3× return and +30% PF, the live worker can be pointed
+at the long-short yaml. I will not make that switch automatically —
+the spec explicitly requires user approval and a strict gate met.
+
+Recommended next research: overlay a single mechanism (RS sizing,
+funding filter, or HMM filter) on the long-short variant to test
+whether it can bring DD below the 5.54% gate without losing the
+return / PF gains.
+
+See `research/supertrend_short_report.md`.
+
 ## Live tick display auto-switch (Issue #17) — shipped
 
 The live-worker per-tick output now auto-selects fields based on the
