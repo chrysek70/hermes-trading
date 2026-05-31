@@ -433,6 +433,85 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## BTC/ETH long-short + overlay sweep (Issue #20) — funding filter ADOPTED
+
+Issue #19's long-short variant missed the DD gate by 0.22 pp (5.76% vs
+5.54% live floor). This experiment overlaid the three already-tested
+mechanisms (HMM, funding, RS) on the long-short variant with
+direction-aware mapping and tested whether any could pull DD below
+the gate without sacrificing return/PF.
+
+Direction-aware mapping conventions used:
+- **HMM:** per-asset Gaussian HMM applied symmetrically to longs and
+  shorts. Volatility-based regime affects both trend-following
+  directions identically — high-vol bars hurt either side equally.
+- **Funding:** symmetric inversion. Long entries blocked at funding
+  percentile ≥ 95 (Issue #7 behaviour). Short entries blocked at
+  percentile ≤ 5 (extreme negative funding → squeeze setup → bad for
+  shorts).
+- **RS:** direction-aware. Long-side of asset X uses X's own
+  build_asset_decisions (asset stronger); short-side of X uses the
+  *other* asset's decision (asset X weaker → favored as short).
+  Existing pairwise BTC/ETH RS module re-used; no new rule designed.
+
+48mo walk-forward, 20 folds, train 1440 / test 360 / embargo 6:
+
+| variant | n | L | S | OOS return | DD | PF | folds+ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline (Issue #19) | 129 | 65 | 64 | +139.47% | 5.76% | 3.26 | 16/20 |
+| hmm_filter | 74 | 40 | 34 | +49.25% | **4.29%** | 3.04 | 15/20 |
+| hmm_sizing | 74 | 40 | 34 | +49.25% | 4.29% | 3.04 | 15/20 |
+| **funding_filter** | **123** | 63 | 60 | **+139.71%** | **4.64%** | **3.35** | **16/20** |
+| funding_sizing | 123 | 63 | 60 | +133.64% | 4.71% | 3.34 | 16/20 |
+| rs_sizing | 92 | 48 | 44 | +74.61% | **4.09%** | **3.64** | **17/20** |
+
+Adoption gates:
+- Primary: DD ≤ 5.54%, PF ≥ 3.26, return ≥ +139.47%, trades ≥ 100
+- Secondary: DD ≤ 5.54%, PF ≥ 3.00, return ≥ +120%, trades ≥ 100
+
+**Result: `btc_eth_long_short_funding_filter` passes the primary gate
+on all four metrics. `funding_sizing` passes the secondary gate.**
+
+`funding_filter` adopted as research candidate. **First overlay
+variant in the project to clear a primary adoption gate cleanly.**
+
+Mechanism summary:
+
+- The funding filter affected only 6 trades out of 129 (long 65 → 63,
+  short 64 → 60) but those 6 trades were apparently sitting on the
+  path to the maximum drawdown. DD collapsed from 5.76% → 4.64%
+  (-1.12 pp, -19% relative) while return *increased* slightly
+  (+139.47% → +139.71%). PF +0.09, Sharpe +0.012, win rate +1.1 pp.
+- HMM cut trade base from 129 → 74 (-43%). Largest DD reduction
+  (-1.47 pp) but return collapsed +139% → +49%. Filter and sizing
+  modes gave identical results (bimodal HMM probabilities — same
+  pattern as Issue #6).
+- RS sizing produced the best risk-adjusted result of any variant
+  (PF 3.64, DD 4.09%, 17/20 folds positive) but cut trade count to 92
+  (below the 100 gate) and return to +74.61%. Mechanism works; sample
+  size blocks adoption — natural top-5 candidate.
+
+Honest caveats:
+
+- The funding filter affects only 6 trades. The DD-reduction
+  confidence is medium-high, not certainty. The mechanism is
+  consistent with Issue #7's prior; the effect is structurally larger
+  on long-short because the symmetric inversion exposes the filter
+  to both ends of the funding distribution.
+- Issue #7's "within noise" conclusion was correct for long-only
+  (2 of 65 trades affected). On long-short with 129 baseline trades,
+  symmetric application catches both overheated-longs and
+  squeeze-bottom-shorts; the structural effect is larger.
+
+Live config: **UNCHANGED**. Per the hard rules in Issue #20, the
+adopted research candidate is not auto-applied to live. Wiring it
+into the live worker requires (a) pointing `state/live_multiasset.yaml`
+at the long-short yaml AND (b) attaching the funding-decisions
+DataFrame inside `multi_loop.run`. Neither is in scope for this
+issue.
+
+See `research/long_short_overlay_report.md`.
+
 ## SuperTrend long-short (Issue #19) — research-only, gate failed by 0.22 pp
 
 Added symmetric short-side support to the SuperTrend(10, 3) strategy.
