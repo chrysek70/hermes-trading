@@ -433,6 +433,54 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Vol-sizing overlay wired opt-in to live (Issue #33) — shipped
+
+After Issues #27 (research), #27 follow-up (`research/recent_adaptation_sizing_report.md`)
+and #29 (live fill parity) closed the prerequisites, vol_sizing
+is now available in the live paper worker as an OPT-IN additive on
+a new yaml `state/live_multiasset_long_short_funding_vol.yaml`.
+
+Implementation:
+- `LiveVolSizingOverlay` class in `hermes_trading/multi_loop.py` mirrors
+  `LiveFundingOverlay`. Loads ~15 months of 4h close data per asset
+  at boot; computes 24-bar rolling realised vol of log returns;
+  per-tick lookup computes quartile thresholds from the trailing
+  12-month train window STRICTLY BEFORE the current bar (no future
+  leak); returns multiplier 1.00 / 0.50 / 0.25 by Q-band, fail-open
+  to 1.00 with heartbeat warning on insufficient history or loader
+  failure.
+- `run()` reads optional `vol_sizing:` config block (disabled by
+  default — existing yaml unchanged). When enabled, opens new
+  positions with `size = base × vol_mult` while funding stays a hard
+  gate. Locks `vol_multiplier` at entry; never resizes an open
+  position.
+- Trade rows gain `base_size`, `vol_multiplier`, `final_size`,
+  `realized_vol_24`, `vol_bucket`, `vol_q1`, `vol_q2`, `vol_q3`.
+  Decay monitor schema preserved (it only requires `return`).
+- Heartbeat gains `vol_sizing_enabled`, `realized_vol_24`,
+  `vol_bucket`, `vol_multiplier`, `vol_q1`, `vol_q2`, `vol_q3` per
+  asset.
+- Verbose tick output adds `vol: rv24=X% bucket=QN mult=Y q=[a,b,c]`
+  per asset (Issue #33 spec format).
+
+Tests: Section 16 of `scripts/test_multiasset_worker.py` covers
+locked-defaults, pure bucket / multiplier mapping, opt-in config
+schema, existing config unchanged (no vol block), fail-open under
+insufficient history, low / mid / high vol bucket assignment with
+synthetic series, no-future-leak via train-window slicing,
+source-level wiring (overlay instantiation, multiplier application
+at entry, trade-row carriage, heartbeat fields, verbose emission,
+funding gate independence). 240/240 multi-asset checks now pass
+(was 194). Decay monitor 14/14 still passes. `py_compile` clean.
+
+`signals.py`, `state/strategy_supertrend_long_short.yaml`,
+`state/live_multiasset_long_short_funding.yaml`, and `loop.py`
+all unchanged.
+
+Adoption gate per the spec: no automatic default switchover.
+Operator points `--config` at the new yaml when ready. Suggested
+forward paper-test ~30 trades before any default switch.
+
 ## Adaptive regime-based position sizing (Issue #27) — research
 
 Tested three sizing overlays on top of the currently adopted BTC/ETH

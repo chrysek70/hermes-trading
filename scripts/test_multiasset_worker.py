@@ -1039,6 +1039,201 @@ def main() -> int:
           "can_enter(asset, positions_by_asset, max_open)" in replay_src)
     print()
 
+    # --- 16. vol_sizing live overlay (Issue #33)
+    # NOTE: Section 15 is reserved for the online walk-forward simulator
+    # (Issue #32, in flight). Numbering chosen to avoid collision.
+    print("16. vol_sizing live overlay (Issue #33)")
+    from hermes_trading.multi_loop import (
+        VOL_SIZING_WINDOW_BARS_DEFAULT,
+        VOL_SIZING_TRAIN_MONTHS_DEFAULT,
+        VOL_SIZING_MULT_LOW_DEFAULT,
+        VOL_SIZING_MULT_MID_DEFAULT,
+        VOL_SIZING_MULT_HIGH_DEFAULT,
+        vol_bucket_from_thresholds,
+        vol_multiplier_from_bucket,
+        LiveVolSizingOverlay,
+    )
+
+    # 15.0 Locked defaults match Issue #27 spec
+    check("VOL_SIZING_WINDOW_BARS_DEFAULT == 24 (4 days at 4h)",
+          VOL_SIZING_WINDOW_BARS_DEFAULT == 24)
+    check("VOL_SIZING_TRAIN_MONTHS_DEFAULT == 12 (rolling refit)",
+          VOL_SIZING_TRAIN_MONTHS_DEFAULT == 12)
+    check("VOL_SIZING_MULT_LOW_DEFAULT == 1.00",
+          abs(VOL_SIZING_MULT_LOW_DEFAULT - 1.00) < 1e-12)
+    check("VOL_SIZING_MULT_MID_DEFAULT == 0.50",
+          abs(VOL_SIZING_MULT_MID_DEFAULT - 0.50) < 1e-12)
+    check("VOL_SIZING_MULT_HIGH_DEFAULT == 0.25",
+          abs(VOL_SIZING_MULT_HIGH_DEFAULT - 0.25) < 1e-12)
+
+    # 15.1 vol_bucket_from_thresholds: pure mapping
+    check("low vol (rv < q25) -> Q1",
+          vol_bucket_from_thresholds(0.005, 0.010, 0.020) == "Q1")
+    check("mid vol (q25 < rv < q75) -> Q2_Q3",
+          vol_bucket_from_thresholds(0.015, 0.010, 0.020) == "Q2_Q3")
+    check("high vol (rv >= q75) -> Q4",
+          vol_bucket_from_thresholds(0.025, 0.010, 0.020) == "Q4")
+    check("rv == q25 boundary -> Q1 (<= q25)",
+          vol_bucket_from_thresholds(0.010, 0.010, 0.020) == "Q1")
+    check("rv == q75 boundary -> Q4 (>= q75)",
+          vol_bucket_from_thresholds(0.020, 0.010, 0.020) == "Q4")
+    check("None rv -> warmup",
+          vol_bucket_from_thresholds(None, 0.010, 0.020) == "warmup")
+    check("None thresholds -> warmup",
+          vol_bucket_from_thresholds(0.015, None, None) == "warmup")
+
+    # 15.2 vol_multiplier_from_bucket: pure mapping
+    check("Q1 bucket -> 1.00 multiplier",
+          abs(vol_multiplier_from_bucket("Q1") - 1.00) < 1e-12)
+    check("Q2_Q3 bucket -> 0.50 multiplier",
+          abs(vol_multiplier_from_bucket("Q2_Q3") - 0.50) < 1e-12)
+    check("Q4 bucket -> 0.25 multiplier",
+          abs(vol_multiplier_from_bucket("Q4") - 0.25) < 1e-12)
+    check("warmup bucket -> 1.00 fail-open multiplier",
+          abs(vol_multiplier_from_bucket("warmup") - 1.00) < 1e-12)
+    check("unknown bucket -> 1.00 fail-open multiplier",
+          abs(vol_multiplier_from_bucket("nonsense") - 1.00) < 1e-12)
+    check("custom mult_high parameter respected",
+          abs(vol_multiplier_from_bucket("Q4", mult_high=0.10) - 0.10) < 1e-12)
+
+    # 15.3 New live yaml exists, is opt-in, contains the spec block
+    vol_cfg_path = ROOT / "state" / "live_multiasset_long_short_funding_vol.yaml"
+    check("opt-in vol_sizing config file exists",
+          vol_cfg_path.exists())
+    vol_cfg = yaml.safe_load(open(vol_cfg_path))
+    check("vol config: assets == [BTC/USDT, ETH/USDT]",
+          vol_cfg["assets"] == ["BTC/USDT", "ETH/USDT"])
+    check("vol config: uses long-short strategy yaml",
+          vol_cfg["strategy"] == "state/strategy_supertrend_long_short.yaml")
+    check("vol config: funding_filter still enabled",
+          vol_cfg["funding_filter"]["enabled"] is True)
+    check("vol config: vol_sizing block exists",
+          "vol_sizing" in vol_cfg)
+    check("vol config: vol_sizing.enabled == True (opt-in active)",
+          vol_cfg["vol_sizing"]["enabled"] is True)
+    check("vol config: vol_sizing.window_bars == 24",
+          vol_cfg["vol_sizing"]["window_bars"] == 24)
+    check("vol config: vol_sizing.train_months == 12",
+          vol_cfg["vol_sizing"]["train_months"] == 12)
+    check("vol config: mult ladder 1.00 / 0.50 / 0.25",
+          vol_cfg["vol_sizing"]["mult_low"] == 1.00
+          and vol_cfg["vol_sizing"]["mult_mid"] == 0.50
+          and vol_cfg["vol_sizing"]["mult_high"] == 0.25)
+
+    # 15.4 EXISTING live yaml unchanged (no vol_sizing block; default OFF)
+    existing_cfg_path = ROOT / "state" / "live_multiasset_long_short_funding.yaml"
+    existing_cfg = yaml.safe_load(open(existing_cfg_path))
+    check("existing live yaml has NO vol_sizing block (unchanged)",
+          "vol_sizing" not in existing_cfg)
+
+    # 15.5 LiveVolSizingOverlay: insufficient-history fails open
+    #
+    # Synthetic overlay constructed by injecting a precomputed rv series
+    # rather than loading klines, so we exercise the lookup logic
+    # without disk / network.
+    import pandas as _pd_15
+    overlay = LiveVolSizingOverlay.__new__(LiveVolSizingOverlay)
+    overlay.assets = ["BTC/USDT"]
+    overlay.timeframe = "4h"
+    overlay.window_bars = 24
+    overlay.train_months = 12
+    overlay.mult_low = 1.00
+    overlay.mult_mid = 0.50
+    overlay.mult_high = 0.25
+    # Tiny rv series — well under the 50-obs stability floor; train slice
+    # will be too small, expect fail-open.
+    small_idx = _pd_15.date_range("2026-04-01", periods=10, freq="4h", tz="UTC")
+    overlay.realised_vol = {"BTC/USDT": _pd_15.Series(
+        [0.01] * 10, index=small_idx, dtype=float,
+    )}
+    s = overlay.state_at("BTC/USDT", small_idx[-1])
+    check("insufficient-history -> available=False",
+          s["available"] is False, f"got {s}")
+    check("insufficient-history -> multiplier == 1.00 (fail-open)",
+          abs(s["multiplier"] - 1.00) < 1e-12, f"got {s['multiplier']}")
+    check("insufficient-history -> bucket == 'warmup'",
+          s["bucket"] == "warmup", f"got {s['bucket']}")
+
+    # 15.6 LiveVolSizingOverlay: with sufficient history, low / mid / high vol
+    # produce the expected multipliers
+    #
+    # Build a 200-bar rv series where the LAST bar is set to a known value.
+    # Most values are 0.010 (mid); we craft the test bar to fall into Q1 / Q4.
+    long_idx = _pd_15.date_range("2026-01-01", periods=400, freq="4h", tz="UTC")
+    rv_base = _pd_15.Series([0.010] * 400, index=long_idx, dtype=float)
+    # Spread the train-window values: half at 0.005, half at 0.015 so
+    # Q25 ~ 0.005, Q75 ~ 0.015.
+    rv_base.iloc[:200] = 0.005
+    rv_base.iloc[200:399] = 0.015
+    # Probe bar (last) set to low-vol value -> Q1 expected
+    rv_base.iloc[-1] = 0.003
+    overlay.realised_vol = {"BTC/USDT": rv_base}
+    s_low = overlay.state_at("BTC/USDT", long_idx[-1])
+    check("sufficient history + low vol -> Q1 multiplier 1.00",
+          s_low["available"] is True
+          and s_low["bucket"] == "Q1"
+          and abs(s_low["multiplier"] - 1.00) < 1e-12,
+          f"got {s_low}")
+    # Probe bar set to mid-vol value -> Q2_Q3 expected
+    rv_base.iloc[-1] = 0.010
+    overlay.realised_vol = {"BTC/USDT": rv_base}
+    s_mid = overlay.state_at("BTC/USDT", long_idx[-1])
+    check("sufficient history + mid vol -> Q2_Q3 multiplier 0.50",
+          s_mid["bucket"] == "Q2_Q3"
+          and abs(s_mid["multiplier"] - 0.50) < 1e-12,
+          f"got {s_mid}")
+    # Probe bar set to high-vol value -> Q4 expected
+    rv_base.iloc[-1] = 0.030
+    overlay.realised_vol = {"BTC/USDT": rv_base}
+    s_high = overlay.state_at("BTC/USDT", long_idx[-1])
+    check("sufficient history + high vol -> Q4 multiplier 0.25",
+          s_high["bucket"] == "Q4"
+          and abs(s_high["multiplier"] - 0.25) < 1e-12,
+          f"got {s_high}")
+
+    # 15.7 No future leak — the train window for the threshold lookup
+    # strictly excludes the current bar.
+    #
+    # If the current bar were INCLUDED, an extreme outlier at that bar
+    # would shift Q75 upward and the bar might not classify as Q4. By
+    # excluding it, the bar at 0.030 (well above the historical Q75 ~ 0.015)
+    # is correctly classified as Q4 — which the previous check confirmed.
+    # Additional explicit check: the quartile dict reports a finite train_n
+    # strictly less than the total series length (since the last bar is
+    # excluded and we slice by the trailing N months).
+    qs = overlay._train_window_quartiles("BTC/USDT", long_idx[-1])
+    check("train-window quartile n < full series len (no future leak)",
+          0 < qs["n"] < len(rv_base), f"got n={qs['n']}, total={len(rv_base)}")
+
+    # 15.8 multi_loop.run() source-level wiring
+    multi_src = (ROOT / "hermes_trading" / "multi_loop.py").read_text()
+    check("multi_loop instantiates LiveVolSizingOverlay when enabled",
+          "vol_overlay = LiveVolSizingOverlay(" in multi_src)
+    check("multi_loop reads vol_sizing.enabled from cfg",
+          'vol_cfg.get("enabled"' in multi_src)
+    check("multi_loop applies vol multiplier at long entry",
+          "size_per_asset * current_vol_mult" in multi_src)
+    check("multi_loop records base_size on the position dict",
+          '"base_size": size_per_asset' in multi_src)
+    check("multi_loop records vol_multiplier on the position dict",
+          '"vol_multiplier": current_vol_mult' in multi_src)
+    check("multi_loop carries base_size / vol_multiplier onto trade row",
+          'trade["base_size"] = position.get("base_size")' in multi_src
+          and 'trade["vol_multiplier"] = position.get("vol_multiplier")' in multi_src)
+    check("multi_loop carries realized_vol_24 / vol_bucket onto trade row",
+          'trade["realized_vol_24"] = position.get("realized_vol_24_at_entry")' in multi_src)
+    check("multi_loop adds vol_sizing_enabled to heartbeat",
+          'asset_hb["vol_sizing_enabled"] = vol_sizing_enabled' in multi_src)
+    check("multi_loop adds vol_bucket / vol_multiplier to heartbeat",
+          'asset_hb["vol_bucket"]' in multi_src
+          and 'asset_hb["vol_multiplier"]' in multi_src)
+    check("multi_loop emits verbose vol line",
+          '"  vol: rv24=' in multi_src)
+    check("funding gate stays an independent hard gate (still in source)",
+          "evaluate_funding_gate" in multi_src
+          and 'if not gate["allow"]' in multi_src)
+    print()
+
     # --- 14. Live-vs-research fill-accounting parity (Issue #29)
     print("14. Live-vs-research fill-accounting parity (Issue #29)")
     from hermes_trading.multi_loop import (
@@ -1385,6 +1580,238 @@ def main() -> int:
           cfg_override.get("fee_per_side") == 0.0005)
     check("config supports slippage override key",
           cfg_override.get("slippage") == 0.0002)
+    print()
+
+    # --- 15. Online walk-forward adaptive simulator (Issue #32)
+    print("15. Online walk-forward adaptive simulator (Issue #32)")
+    import importlib
+    import numpy as np
+    import pandas as pd
+
+    sim_spec = importlib.util.spec_from_file_location(
+        "run_online_walk_forward",
+        ROOT / "scripts" / "run_online_walk_forward.py",
+    )
+    sim_mod = importlib.util.module_from_spec(sim_spec)
+    try:
+        sim_spec.loader.exec_module(sim_mod)
+        check("simulator module imports cleanly", True)
+    except Exception as exc:  # noqa: BLE001
+        check("simulator module imports cleanly", False, str(exc))
+        sim_mod = None
+
+    if sim_mod is not None:
+        # 15.1 rolling_decay rule: 10 synthetic losses (PF=0) → 0.25
+        synth_losses = [
+            {"net_return_pct": -0.01, "exit_reason": "stop",
+             "exit_ts": pd.Timestamp(f"2025-01-{i+1:02d}", tz="UTC")}
+            for i in range(10)
+        ]
+        mult, pf = sim_mod.rolling_decay_multiplier(synth_losses)
+        check("rolling_decay: 10 losses (PF<0.7) -> 0.25",
+              mult == 0.25, f"got mult={mult} pf={pf}")
+
+        # 15.2 rolling_decay rule: 0.7 <= PF < 1.0 case → 0.5
+        # 4 losses at -0.01 (sum -0.04), 6 wins at +0.005 (sum +0.030)
+        # PF = 0.030 / 0.040 = 0.75; in [0.7, 1.0) band -> 0.5
+        synth_pf_low = [{"net_return_pct": -0.01, "exit_reason": "stop",
+                         "exit_ts": pd.Timestamp(f"2025-02-{i+1:02d}", tz="UTC")}
+                        for i in range(4)] + [
+                       {"net_return_pct": +0.005, "exit_reason": "target_rsi",
+                        "exit_ts": pd.Timestamp(f"2025-02-{i+1:02d}", tz="UTC")}
+                       for i in range(4, 10)]
+        mult, pf = sim_mod.rolling_decay_multiplier(synth_pf_low)
+        check("rolling_decay: 10 trades PF in [0.7,1.0) -> 0.5",
+              mult == 0.5, f"got mult={mult} pf={pf}")
+
+        # 15.3 rolling_decay rule: fewer than 10 trades → 1.0
+        synth_few = synth_losses[:5]
+        mult, pf = sim_mod.rolling_decay_multiplier(synth_few)
+        check("rolling_decay: <10 trades -> 1.0",
+              mult == 1.0 and pf is None, f"got mult={mult} pf={pf}")
+
+        # 15.4 consecutive_loss: 3 losses -> 0.5, 4 losses -> 0.25
+        three_losses = [
+            {"net_return_pct": -0.01, "exit_reason": "stop",
+             "exit_ts": pd.Timestamp(f"2025-03-{i+1:02d}", tz="UTC")}
+            for i in range(3)
+        ]
+        mult, streak = sim_mod.consecutive_loss_multiplier(three_losses)
+        check("consec_loss: 3 in a row -> 0.5",
+              mult == 0.5 and streak == 3, f"got mult={mult} streak={streak}")
+        four_losses = three_losses + [
+            {"net_return_pct": -0.01, "exit_reason": "stop",
+             "exit_ts": pd.Timestamp("2025-03-04", tz="UTC")},
+        ]
+        mult, streak = sim_mod.consecutive_loss_multiplier(four_losses)
+        check("consec_loss: 4 in a row -> 0.25",
+              mult == 0.25 and streak == 4, f"got mult={mult} streak={streak}")
+        # win in tail resets
+        reset = three_losses + [
+            {"net_return_pct": +0.01, "exit_reason": "target_rsi",
+             "exit_ts": pd.Timestamp("2025-03-04", tz="UTC")},
+        ]
+        mult, streak = sim_mod.consecutive_loss_multiplier(reset)
+        check("consec_loss: any win resets to 1.0",
+              mult == 1.0 and streak == 0, f"got mult={mult} streak={streak}")
+
+        # 15.5 stop_cluster: 4 of last 5 stops -> 0.5
+        stops_4 = [
+            {"net_return_pct": -0.01, "exit_reason": "stop",
+             "exit_ts": pd.Timestamp(f"2025-04-{i+1:02d}", tz="UTC")}
+            for i in range(4)
+        ] + [
+            {"net_return_pct": +0.01, "exit_reason": "supertrend_flip",
+             "exit_ts": pd.Timestamp("2025-04-05", tz="UTC")},
+        ]
+        mult, count = sim_mod.stop_cluster_multiplier(stops_4)
+        check("stop_cluster: 4 of last 5 stops -> 0.5",
+              mult == 0.5 and count == 4, f"got mult={mult} count={count}")
+        stops_5 = [
+            {"net_return_pct": -0.01, "exit_reason": "stop",
+             "exit_ts": pd.Timestamp(f"2025-04-{i+1:02d}", tz="UTC")}
+            for i in range(5)
+        ]
+        mult, count = sim_mod.stop_cluster_multiplier(stops_5)
+        check("stop_cluster: 5 of last 5 stops -> 0.25",
+              mult == 0.25 and count == 5, f"got mult={mult} count={count}")
+        # mixed: 3 of last 5 stops -> 1.0
+        stops_3 = stops_5[:3] + [
+            {"net_return_pct": +0.01, "exit_reason": "target_rsi",
+             "exit_ts": pd.Timestamp("2025-04-04", tz="UTC")},
+            {"net_return_pct": +0.01, "exit_reason": "supertrend_flip",
+             "exit_ts": pd.Timestamp("2025-04-05", tz="UTC")},
+        ]
+        mult, count = sim_mod.stop_cluster_multiplier(stops_3)
+        check("stop_cluster: 3 of last 5 stops -> 1.0",
+              mult == 1.0 and count == 3, f"got mult={mult} count={count}")
+
+        # 15.6 vol_sizing: synthetic high-vol series -> multiplier <= 1.0
+        # build a 200-bar series with a clear high-vol regime in the tail
+        rng = np.random.default_rng(42)
+        idx = pd.date_range("2025-01-01", periods=200, freq="4h", tz="UTC")
+        # first 150 bars: low vol (sigma 0.001), last 50 bars: high vol (sigma 0.02)
+        log_steps = np.concatenate([
+            rng.normal(0.0, 0.001, 150),
+            rng.normal(0.0, 0.02, 50),
+        ])
+        close = 100.0 * np.exp(np.cumsum(log_steps))
+        s = pd.Series(close, index=idx)
+        vs = sim_mod.VolSizingState(
+            s, idx,
+            refit_train_months=1,
+            refit_every_bars=10,
+            vol_window=24,
+        )
+        # Walk forward so the state refits causally.
+        last_mult = None
+        last_rv = None
+        for i in range(1, len(idx)):
+            vs.update(i)
+            last_mult, last_rv = vs.multiplier(i)
+        check("vol_sizing: high-vol tail produces multiplier <= 1.0",
+              last_mult is not None and last_mult <= 1.0,
+              f"got mult={last_mult} rv={last_rv}")
+
+        # 15.7 ensemble = MIN(rolling_decay, stop_cluster, vol_sizing)
+        # Build a memory where rolling_decay=0.5, stop_cluster=1.0,
+        # vol=0.5. MIN should be 0.5.
+        ensemble_trades = synth_pf_low  # rolling_decay -> 0.5
+        # The stop_cluster lookup on these 10 trades:
+        sc_mult, _ = sim_mod.stop_cluster_multiplier(ensemble_trades)
+        rd_mult, _ = sim_mod.rolling_decay_multiplier(ensemble_trades)
+        # Use a vs that will yield 1.0 (low vol)
+        rng2 = np.random.default_rng(7)
+        idx2 = pd.date_range("2025-06-01", periods=200, freq="4h", tz="UTC")
+        close2 = 100.0 * np.exp(np.cumsum(rng2.normal(0.0, 0.001, 200)))
+        vs_low = sim_mod.VolSizingState(
+            pd.Series(close2, index=idx2), idx2,
+            refit_train_months=1, refit_every_bars=10, vol_window=24,
+        )
+        for i in range(1, 100):
+            vs_low.update(i)
+        vol_mult, _ = vs_low.multiplier(99)
+        mults = sim_mod._compute_multipliers(
+            "ensemble", ensemble_trades, vs_low, 99,
+        )
+        expected = min(rd_mult, sc_mult, vol_mult)
+        check("ensemble = MIN(rolling_decay, stop_cluster, vol_sizing)",
+              abs(mults["active"] - expected) < 1e-12,
+              f"got active={mults['active']} expected={expected}")
+
+        # 15.8 No future leakage: rule readout at bar T uses only trades
+        # with exit_ts < T.
+        mem = sim_mod.ClosedTradeMemory()
+        t1 = {"net_return_pct": -0.01, "exit_reason": "stop",
+              "exit_time": "2025-05-01T00:00:00+00:00",
+              "exit_ts": pd.Timestamp("2025-05-01", tz="UTC")}
+        t2 = {"net_return_pct": -0.01, "exit_reason": "stop",
+              "exit_time": "2025-05-15T00:00:00+00:00",
+              "exit_ts": pd.Timestamp("2025-05-15", tz="UTC")}
+        mem.record_close("BTC/USDT", t1)
+        mem.record_close("BTC/USDT", t2)
+        # decision at exactly t2.exit_ts must NOT include t2 (strict <)
+        seen_at_t2 = mem.closed_before("BTC/USDT",
+                                        pd.Timestamp("2025-05-15", tz="UTC"))
+        check("no future leakage: bar T excludes trades whose exit_ts == T",
+              len(seen_at_t2) == 1 and seen_at_t2[0] is t1,
+              f"got len={len(seen_at_t2)}")
+        # decision strictly after t2 includes both
+        seen_after = mem.closed_before(
+            "BTC/USDT", pd.Timestamp("2025-05-16", tz="UTC"))
+        check("no future leakage: bar T+ includes all earlier trades",
+              len(seen_after) == 2,
+              f"got len={len(seen_after)}")
+        # decision at t1.exit_ts excludes both (strict <)
+        seen_before = mem.closed_before(
+            "BTC/USDT", pd.Timestamp("2025-05-01", tz="UTC"))
+        check("no future leakage: bar T == first exit excludes both",
+              len(seen_before) == 0,
+              f"got len={len(seen_before)}")
+
+        # 15.9 Sizing locks at entry — adaptive rules never resize OPEN trades
+        # Inspect the simulator source for the invariant directly: there is no
+        # write to position['adaptive_at_entry'] after the entry path.
+        sim_src = (ROOT / "scripts" / "run_online_walk_forward.py").read_text()
+        # Count assignments to adaptive_at_entry — there should be exactly two:
+        # one in the long entry block, one in the short entry block.
+        n_assigns = sim_src.count('"adaptive_at_entry":')
+        check("size locks at entry: exactly 2 'adaptive_at_entry' assignments",
+              n_assigns == 2, f"got {n_assigns}")
+        # And the exit path reads but never writes it.
+        check("size locks at entry: exit path reads position['adaptive_at_entry']",
+              "position[\"adaptive_at_entry\"]" in sim_src)
+
+        # 15.10 `none` adaptive rule -> trades count matches existing 6mo replay.
+        # We don't re-run the replay here (network-bound); instead we
+        # verify the decision-log column set matches the spec.
+        spec_decision_cols = [
+            "timestamp", "asset", "action", "direction", "setup",
+            "signal_state", "base_size", "adaptive_multiplier",
+            "final_size", "reason", "rolling_pf_10",
+            "consecutive_losses", "stop_cluster_count",
+            "vol_sizing_multiplier", "funding_decision",
+            "position_state", "realized_pnl_to_date",
+        ]
+        check("decision-log columns match spec",
+              sim_mod.DECISION_COLUMNS == spec_decision_cols,
+              f"got {sim_mod.DECISION_COLUMNS}")
+        spec_trade_cols = [
+            "asset", "direction", "entry_time", "exit_time",
+            "entry_price", "exit_price", "gross_return_pct",
+            "net_return_pct", "base_size", "adaptive_multiplier",
+            "final_size", "exit_reason",
+        ]
+        check("trade-log columns match spec",
+              sim_mod.TRADE_COLUMNS == spec_trade_cols,
+              f"got {sim_mod.TRADE_COLUMNS}")
+
+        # 15.11 ADAPTIVE_RULES contains the 6 spec rules
+        spec_rules = ("none", "rolling_decay_size", "consecutive_loss_size",
+                      "stop_cluster_size", "vol_sizing", "ensemble")
+        check("ADAPTIVE_RULES contains the 6 spec rules",
+              set(sim_mod.ADAPTIVE_RULES) == set(spec_rules),
+              f"got {sim_mod.ADAPTIVE_RULES}")
     print()
 
     if failures:

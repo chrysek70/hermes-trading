@@ -170,6 +170,223 @@ class LiveFundingOverlay:
             return {"available": False, "rate": None, "percentile": None}
 
 
+# ---------- vol_sizing overlay (Issue #33) ----------------------------------
+
+# Locked Issue #27 vol_sizing parameters. DO NOT tune without a new experiment
+# + adoption gate.
+VOL_SIZING_WINDOW_BARS_DEFAULT = 24            # 4 days at 4h
+VOL_SIZING_TRAIN_MONTHS_DEFAULT = 12           # rolling refit window
+VOL_SIZING_MULT_LOW_DEFAULT = 1.00             # Q1 (low vol)
+VOL_SIZING_MULT_MID_DEFAULT = 0.50             # Q2 / Q3 (mid vol)
+VOL_SIZING_MULT_HIGH_DEFAULT = 0.25            # Q4 (high vol)
+
+
+def vol_bucket_from_thresholds(
+    rv: float | None,
+    q25: float | None,
+    q75: float | None,
+) -> str:
+    """Pure mapping from realised-vol value + quartile thresholds to a
+    bucket label. Used by both the live overlay and the self-test. None
+    inputs -> "warmup"."""
+    if rv is None or q25 is None or q75 is None:
+        return "warmup"
+    try:
+        rv_f = float(rv)
+        q25_f = float(q25)
+        q75_f = float(q75)
+    except (TypeError, ValueError):
+        return "warmup"
+    if rv_f <= q25_f:
+        return "Q1"
+    if rv_f >= q75_f:
+        return "Q4"
+    return "Q2_Q3"
+
+
+def vol_multiplier_from_bucket(
+    bucket: str,
+    mult_low: float = VOL_SIZING_MULT_LOW_DEFAULT,
+    mult_mid: float = VOL_SIZING_MULT_MID_DEFAULT,
+    mult_high: float = VOL_SIZING_MULT_HIGH_DEFAULT,
+) -> float:
+    """Bucket label -> multiplier. ``warmup`` fails open to ``mult_low``
+    (1.0 by default) so the worker never blocks during indicator
+    warmup."""
+    if bucket == "Q1":
+        return float(mult_low)
+    if bucket == "Q4":
+        return float(mult_high)
+    if bucket == "Q2_Q3":
+        return float(mult_mid)
+    return float(mult_low)  # warmup / unknown -> fail open
+
+
+class LiveVolSizingOverlay:
+    """Per-asset realised-vol sizing overlay (Issue #33).
+
+    Loads ``train_months + train_months_safety`` of 4h close data per
+    asset at boot via ``hermes_trading.data.load_klines``. Computes
+    24-bar rolling realised vol of log returns. For each per-tick
+    lookup, the Q25 / Q50 / Q75 thresholds are computed from the
+    most-recent ``train_months`` of vol observations available BEFORE
+    or AT the queried timestamp (strictly causal — no future leak).
+    The returned multiplier is one of ``mult_low`` / ``mult_mid`` /
+    ``mult_high`` based on which Q-band the current bar's rv falls
+    into.
+
+    Fail-open behaviour: if the loader fails or there is insufficient
+    history for a stable train-window quartile (< 50 vol observations
+    in the train slice), the overlay returns ``available=False`` and a
+    ``mult_low`` multiplier (1.0) — never blocks the strategy.
+
+    No future leakage by construction:
+      - rolling vol at bar T uses only bars <= T
+      - quartile thresholds at bar T use only vol observations strictly
+        before T (we slice ``rv.loc[:ts - 1 bar]`` for the threshold
+        window)
+    """
+
+    def __init__(self,
+                 assets: list[str],
+                 timeframe: str = "4h",
+                 window_bars: int = VOL_SIZING_WINDOW_BARS_DEFAULT,
+                 train_months: int = VOL_SIZING_TRAIN_MONTHS_DEFAULT,
+                 mult_low: float = VOL_SIZING_MULT_LOW_DEFAULT,
+                 mult_mid: float = VOL_SIZING_MULT_MID_DEFAULT,
+                 mult_high: float = VOL_SIZING_MULT_HIGH_DEFAULT,
+                 load_history_months: int | None = None):
+        from . import data as data_mod  # local import to avoid a hard
+                                        # ccxt dep at module import time
+        self.assets = list(assets)
+        self.timeframe = timeframe
+        self.window_bars = int(window_bars)
+        self.train_months = int(train_months)
+        self.mult_low = float(mult_low)
+        self.mult_mid = float(mult_mid)
+        self.mult_high = float(mult_high)
+        # Load a bit more than train_months to ensure the first
+        # multiplier lookup has a full train window available.
+        months_to_load = int(load_history_months
+                             or (train_months + 3))
+        self.realised_vol: dict[str, "pd.Series | None"] = {}
+        for asset in assets:
+            sym = asset.replace("/", "")
+            try:
+                df = data_mod.resample(
+                    data_mod.load_klines(sym, n_months=months_to_load),
+                    timeframe,
+                )
+                log_ret = (df["close"] / df["close"].shift(1)).apply(
+                    lambda x: pd.NA if pd.isna(x) else float(x)
+                )
+                # numpy log of close ratio = log_ret
+                import numpy as _np
+                logr = _np.log(df["close"] / df["close"].shift(1))
+                rv = logr.rolling(self.window_bars,
+                                  min_periods=self.window_bars).std()
+                self.realised_vol[asset] = rv
+                non_na = rv.dropna()
+                if non_na.empty:
+                    log(f"  vol_sizing overlay loaded for {asset}: "
+                        f"{len(rv)} bars but no non-NaN realised-vol "
+                        f"yet (will fail open)")
+                else:
+                    log(f"  vol_sizing overlay loaded for {asset}: "
+                        f"{len(rv)} bars, {len(non_na)} rv obs, "
+                        f"span {rv.index[0].date()} -> {rv.index[-1].date()}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"[yellow]vol_sizing overlay unavailable for {asset}: "
+                    f"{exc}; multiplier will fail open to "
+                    f"{self.mult_low}[/yellow]")
+                self.realised_vol[asset] = None
+
+    def _train_window_quartiles(self, asset: str, ts) -> dict:
+        """Return train-window {q25, q50, q75, n} from vol observations
+        strictly before ``ts``. ``ts`` is timezone-aware. Returns NaN /
+        n=0 if insufficient data."""
+        rv = self.realised_vol.get(asset)
+        if rv is None or rv.empty:
+            return {"q25": None, "q50": None, "q75": None, "n": 0}
+        ts_pd = pd.Timestamp(ts)
+        if ts_pd.tzinfo is None:
+            ts_pd = ts_pd.tz_localize("UTC")
+        # train slice = bars in the trailing train_months window, ending
+        # strictly BEFORE ts (no future leak).
+        train_start = ts_pd - pd.DateOffset(months=self.train_months)
+        train_slice = rv.loc[train_start:ts_pd]
+        # Drop the bar at ts itself (we want strictly-before).
+        if not train_slice.empty and train_slice.index[-1] == ts_pd:
+            train_slice = train_slice.iloc[:-1]
+        train_clean = train_slice.dropna()
+        if len(train_clean) < 50:  # arbitrary stability floor
+            return {"q25": None, "q50": None, "q75": None,
+                    "n": int(len(train_clean))}
+        return {
+            "q25": float(train_clean.quantile(0.25)),
+            "q50": float(train_clean.quantile(0.50)),
+            "q75": float(train_clean.quantile(0.75)),
+            "n": int(len(train_clean)),
+        }
+
+    def state_at(self, asset: str, ts) -> dict:
+        """Per-tick lookup. Returns a dict with keys:
+            available, realized_vol, q25, q50, q75, bucket, multiplier,
+            train_n.
+        ``available=False`` means warmup / loader failure / insufficient
+        history — caller should treat as multiplier 1.0 (no down-size).
+        """
+        rv = self.realised_vol.get(asset)
+        if rv is None or rv.empty:
+            return {"available": False, "realized_vol": None,
+                    "q25": None, "q50": None, "q75": None,
+                    "bucket": "warmup", "multiplier": self.mult_low,
+                    "train_n": 0}
+        try:
+            ts_pd = pd.Timestamp(ts)
+            if ts_pd.tzinfo is None:
+                ts_pd = ts_pd.tz_localize("UTC")
+            # current bar's realised vol (closed bar at ts)
+            window = rv.loc[:ts_pd]
+            if window.empty:
+                return {"available": False, "realized_vol": None,
+                        "q25": None, "q50": None, "q75": None,
+                        "bucket": "warmup",
+                        "multiplier": self.mult_low,
+                        "train_n": 0}
+            current_rv_val = window.iloc[-1]
+            current_rv = (float(current_rv_val)
+                          if not pd.isna(current_rv_val) else None)
+            qs = self._train_window_quartiles(asset, ts_pd)
+            bucket = vol_bucket_from_thresholds(
+                current_rv, qs["q25"], qs["q75"],
+            )
+            mult = vol_multiplier_from_bucket(
+                bucket,
+                mult_low=self.mult_low,
+                mult_mid=self.mult_mid,
+                mult_high=self.mult_high,
+            )
+            available = (current_rv is not None
+                         and qs["q25"] is not None
+                         and qs["q75"] is not None)
+            return {
+                "available": bool(available),
+                "realized_vol": current_rv,
+                "q25": qs["q25"], "q50": qs["q50"], "q75": qs["q75"],
+                "bucket": bucket,
+                "multiplier": float(mult),
+                "train_n": qs["n"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            log(f"[yellow]vol_sizing lookup failed for {asset}: "
+                f"{exc}; multiplier failing open to {self.mult_low}[/yellow]")
+            return {"available": False, "realized_vol": None,
+                    "q25": None, "q50": None, "q75": None,
+                    "bucket": "warmup", "multiplier": self.mult_low,
+                    "train_n": 0}
+
+
 # ---------- pure helpers (used by both run loop and self-test) --------------
 
 def build_trade_row(
@@ -395,6 +612,36 @@ async def run(
     fee_per_side = float(cfg.get("fee_per_side", RESEARCH_FEE_PER_SIDE))
     slippage = float(cfg.get("slippage", RESEARCH_SLIPPAGE))
 
+    # Issue #33 — vol_sizing overlay (opt-in). Disabled by default. Locked
+    # Issue #27 parameters; do NOT tune without a new experiment.
+    vol_cfg = (cfg.get("vol_sizing") or {})
+    vol_sizing_enabled = bool(vol_cfg.get("enabled", False))
+    vol_window_bars = int(vol_cfg.get("window_bars",
+                                       VOL_SIZING_WINDOW_BARS_DEFAULT))
+    vol_train_months = int(vol_cfg.get("train_months",
+                                        VOL_SIZING_TRAIN_MONTHS_DEFAULT))
+    vol_mult_low = float(vol_cfg.get("mult_low",
+                                      VOL_SIZING_MULT_LOW_DEFAULT))
+    vol_mult_mid = float(vol_cfg.get("mult_mid",
+                                      VOL_SIZING_MULT_MID_DEFAULT))
+    vol_mult_high = float(vol_cfg.get("mult_high",
+                                       VOL_SIZING_MULT_HIGH_DEFAULT))
+    vol_overlay: LiveVolSizingOverlay | None = None
+    if vol_sizing_enabled:
+        log(f"  vol_sizing ENABLED  window_bars={vol_window_bars}  "
+            f"train_months={vol_train_months}  "
+            f"mult=({vol_mult_low}/{vol_mult_mid}/{vol_mult_high})")
+        vol_overlay = LiveVolSizingOverlay(
+            assets, timeframe=timeframe,
+            window_bars=vol_window_bars,
+            train_months=vol_train_months,
+            mult_low=vol_mult_low,
+            mult_mid=vol_mult_mid,
+            mult_high=vol_mult_high,
+        )
+    else:
+        log(f"  vol_sizing disabled")
+
     log(f"Booting hermes-trading MULTI-ASSET paper worker")
     log(f"  assets={assets}  timeframe={timeframe}  max_open={max_open}")
     log(f"  strategy={strategy_path}  size_per_asset={size_per_asset}")
@@ -522,6 +769,16 @@ async def run(
             if funding_overlay is not None:
                 funding_state = funding_overlay.state_at(asset, signal_row.get("ts"))
 
+            # Issue #33 — vol_sizing per-bar lookup. Keyed by signal bar
+            # so the multiplier the live worker uses at entry equals what
+            # walk-forward research would have used for that signal bar.
+            vol_state = None
+            if vol_overlay is not None:
+                vol_state = vol_overlay.state_at(asset, signal_row.get("ts"))
+            current_vol_mult = (float(vol_state["multiplier"])
+                                if vol_state is not None
+                                else 1.0)
+
             funding_block_message: str | None = None
 
             if position is None:
@@ -557,12 +814,19 @@ async def run(
                             # Issue #29: live entry fill matches the research
                             # convention — close + adverse slippage.
                             entry_fill = last_price * (1.0 + slippage)
+                            # Issue #33 — vol_sizing multiplier locks at entry.
+                            # final_size = size_per_asset * vol_mult.
+                            # funding_allow is already 1 here (we passed gate);
+                            # vol_mult is 1.0 when overlay disabled or warmup.
+                            final_size = size_per_asset * current_vol_mult
                             new_pos = {
                                 "asset": asset,
                                 "entry_price": entry_fill,
                                 "entry_price_pre_slip": last_price,
                                 "opened_at": now_iso(),
-                                "size": size_per_asset,
+                                "size": final_size,
+                                "base_size": size_per_asset,
+                                "vol_multiplier": current_vol_mult,
                                 "direction": "long",
                                 "setup": setup_l,
                                 "stop": float(signals.initial_stop(signal_row, setup_l, strategy)),
@@ -572,12 +836,23 @@ async def run(
                                     funding_state.get("rate") if funding_state else None),
                                 "funding_percentile_at_entry": (
                                     funding_state.get("percentile") if funding_state else None),
+                                "realized_vol_24_at_entry": (
+                                    vol_state.get("realized_vol") if vol_state else None),
+                                "vol_bucket_at_entry": (
+                                    vol_state.get("bucket") if vol_state else None),
+                                "vol_q1_at_entry": (
+                                    vol_state.get("q25") if vol_state else None),
+                                "vol_q2_at_entry": (
+                                    vol_state.get("q50") if vol_state else None),
+                                "vol_q3_at_entry": (
+                                    vol_state.get("q75") if vol_state else None),
                             }
                             positions_state[asset] = new_pos
                             positions.save_position(asset, new_pos, state_dir)
                             log(f"[green]ENTER long[/green] {asset} @ {entry_fill:.2f} "
-                                f"({setup_l}, stop={new_pos['stop']:.2f}, size={size_per_asset}, "
-                                f"slip={slippage*1e4:.1f}bp)")
+                                f"({setup_l}, stop={new_pos['stop']:.2f}, "
+                                f"base={size_per_asset} vol_mult={current_vol_mult:.2f} "
+                                f"final={final_size:.4f}, slip={slippage*1e4:.1f}bp)")
 
                     if not opened and positions_state[asset] is None:
                         # short side also evaluated on signal_row (Issue #24)
@@ -607,12 +882,16 @@ async def run(
                                 # Issue #29: short entry fill = close − adverse
                                 # slippage, mirroring backtest._run_state_machine.
                                 entry_fill = last_price * (1.0 - slippage)
+                                # Issue #33 — vol_sizing multiplier locks at entry.
+                                final_size = size_per_asset * current_vol_mult
                                 new_pos = {
                                     "asset": asset,
                                     "entry_price": entry_fill,
                                     "entry_price_pre_slip": last_price,
                                     "opened_at": now_iso(),
-                                    "size": size_per_asset,
+                                    "size": final_size,
+                                    "base_size": size_per_asset,
+                                    "vol_multiplier": current_vol_mult,
                                     "direction": "short",
                                     "setup": setup_s,
                                     "stop": float(signals.initial_stop_short(signal_row, setup_s, strategy)),
@@ -622,12 +901,23 @@ async def run(
                                         funding_state.get("rate") if funding_state else None),
                                     "funding_percentile_at_entry": (
                                         funding_state.get("percentile") if funding_state else None),
+                                    "realized_vol_24_at_entry": (
+                                        vol_state.get("realized_vol") if vol_state else None),
+                                    "vol_bucket_at_entry": (
+                                        vol_state.get("bucket") if vol_state else None),
+                                    "vol_q1_at_entry": (
+                                        vol_state.get("q25") if vol_state else None),
+                                    "vol_q2_at_entry": (
+                                        vol_state.get("q50") if vol_state else None),
+                                    "vol_q3_at_entry": (
+                                        vol_state.get("q75") if vol_state else None),
                                 }
                                 positions_state[asset] = new_pos
                                 positions.save_position(asset, new_pos, state_dir)
                                 log(f"[red]ENTER short[/red] {asset} @ {entry_fill:.2f} "
-                                    f"({setup_s}, stop={new_pos['stop']:.2f}, size={size_per_asset}, "
-                                    f"slip={slippage*1e4:.1f}bp)")
+                                    f"({setup_s}, stop={new_pos['stop']:.2f}, "
+                                    f"base={size_per_asset} vol_mult={current_vol_mult:.2f} "
+                                    f"final={final_size:.4f}, slip={slippage*1e4:.1f}bp)")
             else:
                 bars_held = int((pd.Timestamp.now(tz="UTC") -
                                  pd.Timestamp(position["opened_at"])).total_seconds()
@@ -677,6 +967,19 @@ async def run(
                     if "funding_rate_at_entry" in position:
                         trade["funding_rate_at_entry"] = position["funding_rate_at_entry"]
                         trade["funding_percentile_at_entry"] = position.get("funding_percentile_at_entry")
+                    # Issue #33 — carry vol_sizing context onto the closed trade row.
+                    # These keys match the Issue #33 spec field names.
+                    if "base_size" in position:
+                        trade["base_size"] = position.get("base_size")
+                    if "vol_multiplier" in position:
+                        trade["vol_multiplier"] = position.get("vol_multiplier")
+                        trade["final_size"] = float(position.get("size", 0.0))
+                    if "realized_vol_24_at_entry" in position:
+                        trade["realized_vol_24"] = position.get("realized_vol_24_at_entry")
+                        trade["vol_bucket"] = position.get("vol_bucket_at_entry")
+                        trade["vol_q1"] = position.get("vol_q1_at_entry")
+                        trade["vol_q2"] = position.get("vol_q2_at_entry")
+                        trade["vol_q3"] = position.get("vol_q3_at_entry")
                     append_jsonl(state_dir / "trades.jsonl", trade)
                     log(f"[cyan]EXIT {direction}[/cyan] {asset} @ {exit_fill:.2f} "
                         f"({reason}, return={trade['net_return_pct']:+.4f}, "
@@ -753,6 +1056,16 @@ async def run(
                     asset_hb["funding_decision"] = "missing_data"
                     asset_hb["funding_reason"] = ("funding data unavailable; "
                                                   "fail-open policy")
+            # Issue #33 — vol_sizing heartbeat block. Keys match Issue
+            # #33 spec exactly.
+            asset_hb["vol_sizing_enabled"] = vol_sizing_enabled
+            if vol_overlay is not None and vol_state is not None:
+                asset_hb["realized_vol_24"] = vol_state.get("realized_vol")
+                asset_hb["vol_bucket"] = vol_state.get("bucket")
+                asset_hb["vol_multiplier"] = vol_state.get("multiplier")
+                asset_hb["vol_q1"] = vol_state.get("q25")
+                asset_hb["vol_q2"] = vol_state.get("q50")
+                asset_hb["vol_q3"] = vol_state.get("q75")
             per_asset_hb[asset] = asset_hb
             asset_row_for_display[asset] = {
                 "close": last_price,
@@ -767,6 +1080,7 @@ async def run(
                 "signal_row": signal_row, # Issue #24 — closed bar driving decisions
                 "funding_state": funding_state,
                 "funding_blocked_message": funding_block_message,
+                "vol_state": vol_state,   # Issue #33
             }
 
         if assets and len(broken) == len(assets):
@@ -848,6 +1162,19 @@ async def run(
                             log(f"  funding: data unavailable; fail-open")
                     if disp.get("funding_blocked_message"):
                         log(f"  blocked_by: {disp['funding_blocked_message']}")
+                    # Issue #33 — vol_sizing verbose line (format from spec)
+                    if vol_overlay is not None:
+                        vs = disp.get("vol_state")
+                        if vs is not None and vs.get("available"):
+                            rv = vs.get("realized_vol")
+                            q1 = vs.get("q25"); q2 = vs.get("q50"); q3 = vs.get("q75")
+                            log(f"  vol: rv24={rv*100:.2f}% "
+                                f"bucket={vs.get('bucket')} "
+                                f"mult={vs.get('multiplier'):.2f} "
+                                f"q=[{q1*100:.2f}%,{q2*100:.2f}%,{q3*100:.2f}%]")
+                        else:
+                            log(f"  vol: warmup or insufficient history; "
+                                f"fail-open mult=1.00")
             log(f"portfolio open={open_count}/{max_open}  "
                 f"realized={realized_pnl_pct:+.3f}%  "
                 f"unrealized={unrl_portfolio*100:+.3f}%")

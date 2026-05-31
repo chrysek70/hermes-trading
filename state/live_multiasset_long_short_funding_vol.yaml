@@ -1,0 +1,64 @@
+# Multi-asset live (paper) config — adopted long-short + funding-filter
+# candidate (Issues #20 / #21) PLUS opt-in vol_sizing overlay (Issues #27 /
+# #33).
+#
+# This config is OPT-IN. It does NOT replace
+# state/live_multiasset_long_short_funding.yaml (the existing live default,
+# left untouched as a control). Switch to this config explicitly:
+#
+#     uv run python -m hermes_trading.run \
+#         --config state/live_multiasset_long_short_funding_vol.yaml --verbose
+#
+# Fall back to the current default at any time:
+#
+#     uv run python -m hermes_trading.run \
+#         --config state/live_multiasset_long_short_funding.yaml --verbose
+#
+# Locked parameters (from Issues #20, #21, #27, #33). DO NOT tune without a
+# new experiment + adoption gate.
+
+assets:
+  - BTC/USDT
+  - ETH/USDT
+
+timeframe: 4h
+poll_seconds: 10
+indicator_limit: 300
+max_open_positions: 2
+
+strategy: state/strategy_supertrend_long_short.yaml
+
+size_per_asset: 0.5
+circuit_break_after: 5
+heartbeat_schema: "multiasset-v3"   # bumped — adds vol_sizing fields
+
+# Funding hard gate (Issues #20 / #21). Direction-aware, unchanged from
+# the existing live yaml.
+funding_filter:
+  enabled: true
+  block_long_above_pct: 95.0
+  block_short_below_pct: 5.0
+  percentile_window_bars: 180
+  on_missing_data: fail_open
+
+# Vol-quartile sizing overlay (Issues #27 / #33). Multiplicative on top of
+# size_per_asset. Funding remains a hard gate; vol_sizing only ever reduces
+# exposure (never blocks except via mult=0, which it does not produce).
+#
+# Sizing concept (locked):
+#   Q1 (low vol)  -> 1.00 multiplier
+#   Q2 / Q3 (mid) -> 0.50 multiplier
+#   Q4 (high vol) -> 0.25 multiplier
+#
+# Quartile thresholds are computed from a rolling train window of the
+# trailing N months of 4h realised-vol observations, strictly BEFORE the
+# current bar (no future leak). Realised vol = 24-bar rolling std of log
+# returns. Fail-open: multiplier = 1.0 during indicator / quartile warmup
+# or if the loader fails (a warning is logged to the heartbeat).
+vol_sizing:
+  enabled: true
+  window_bars: 24            # 4 days at 4h, locked
+  train_months: 12           # rolling refit window for quartile thresholds
+  mult_low: 1.00             # Q1
+  mult_mid: 0.50             # Q2 / Q3
+  mult_high: 0.25            # Q4

@@ -5,6 +5,14 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Vol-sizing overlay wired opt-in to live (Issue #33).
+  `LiveVolSizingOverlay` in `multi_loop.py` mirrors the existing
+  funding overlay; new yaml `state/live_multiasset_long_short_funding_vol.yaml`
+  is the opt-in path. Existing live config unchanged. Trade rows +
+  heartbeat carry vol context. Verbose tick lines display
+  `vol: rv24=… bucket=Q… mult=… q=[…]`. 240/240 multi-asset
+  self-tests pass (was 194). `signals.py` unchanged.
+  No automatic default switchover.
 - ✓ Adaptive regime-based position sizing — research (Issue #27).
   `scripts/run_adaptive_sizing.py` tested HMM-sizing, vol-quartile-sizing,
   and stacked HMM+vol on top of the adopted long-short + funding

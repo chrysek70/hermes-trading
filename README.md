@@ -358,6 +358,53 @@ on this universe). PF and DD both improve marginally on the parallel
 portfolio. Not a primary strategy. See
 `research/funding_rate_filter_report.md`.
 
+## Vol-sizing overlay — opt-in live (Issue #33)
+
+After Issues #27 (research) and #29 (live fill parity) closed, the
+`vol_sizing` overlay is wired into live paper mode as an **opt-in
+additive** on a NEW config. The existing default config remains
+unchanged as a control.
+
+Run the **current adopted candidate** (no vol sizing):
+
+```bash
+uv run python -m hermes_trading.run \
+    --config state/live_multiasset_long_short_funding.yaml --verbose
+```
+
+Run the **new vol_sizing candidate** (opt-in):
+
+```bash
+uv run python -m hermes_trading.run \
+    --config state/live_multiasset_long_short_funding_vol.yaml --verbose
+```
+
+The vol overlay sizes each entry by the realised-volatility quartile
+at the signal bar:
+
+- Q1 (low vol)  → 1.00 × base size
+- Q2 / Q3 (mid) → 0.50 × base size
+- Q4 (high vol) → 0.25 × base size
+
+Quartile thresholds are computed from a rolling 12-month window of
+trailing 24-bar realised volatility, strictly before the current bar
+(no future leakage). Funding remains a hard entry gate; vol sizing
+only ever reduces exposure. The locked parameters (window, thresholds,
+multipliers) come from Issue #27 and are NOT tunable in the live
+config.
+
+Verbose mode adds per-asset lines like:
+
+```
+  vol: rv24=1.23% bucket=Q4 mult=0.25 q=[0.60%,0.90%,1.40%]
+```
+
+Closed-trade rows on `state/trades.jsonl` carry `base_size`,
+`vol_multiplier`, `final_size`, `realized_vol_24`, `vol_bucket`,
+`vol_q1`, `vol_q2`, `vol_q3` for decay-monitor / audit consumption.
+Heartbeat (`state/heartbeat.json`) carries the same per-asset block
+plus `vol_sizing_enabled: true`.
+
 ## Replay mode (Issue #26)
 
 `scripts/replay_live.py` walks historical bars through the same

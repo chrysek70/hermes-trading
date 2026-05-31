@@ -26,11 +26,15 @@ grouped by layer so it's clear where each future experiment fits.
   funding in Issue #27.** Mapping {1.0, 0.5, 0.25}: PF 3.35 → 3.84,
   DD 4.64% → 2.45%, trade count unchanged (123). Passes adoption
   criterion; not yet live (gated on live paper-fill slippage fix).
-- Volatility-quartile sizing — **tested in Issue #27 and currently
-  the strongest sizing candidate**: PF 3.35 → 4.63, DD 4.64% →
-  2.10%, return-per-exposure essentially preserved (+136.54% vs
-  +139.71%), trade count unchanged. Next live add-on once the
-  Execution-layer slippage fix lands.
+- Volatility-quartile sizing — **shipped opt-in live (Issue #33)
+  after research dominance was confirmed in Issue #27 + recent
+  adaptation follow-up + live fill parity (Issue #29).** Available
+  via `state/live_multiasset_long_short_funding_vol.yaml`; existing
+  config left unchanged. Locked Q1=1.00 / Q2_Q3=0.50 / Q4=0.25 ladder
+  on 24-bar realised vol with rolling 12-month train window.
+  No automatic default switchover — operator chooses when to point
+  `--config` at the new yaml. Forward paper-test pending before any
+  default switch.
 - Volatility targeting (continuous, per-asset by realised vol →
   smoother equity curve). The Issue #27 quartile mapping is
   discrete; a continuous version is an obvious follow-up.
