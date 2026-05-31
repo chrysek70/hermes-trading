@@ -39,12 +39,17 @@ def main() -> None:
         default=None,
         help="single-asset override (ignored when --config is given).",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="extra debug fields in per-tick output (e.g. RSI in SuperTrend mode).",
+    )
     args = parser.parse_args()
 
     if args.config:
         log(f"starting multi-asset worker from {args.config}")
         try:
-            asyncio.run(multi_loop_mod.run(args.config))
+            asyncio.run(multi_loop_mod.run(args.config, verbose=args.verbose))
         except KeyboardInterrupt:
             log("shutting down (keyboard interrupt)")
         return
@@ -52,7 +57,7 @@ def main() -> None:
     goal = load_yaml(STATE_DIR / "goal.yaml")
     asset = args.asset or goal.get("asset", "BTC/USDT")
     try:
-        asyncio.run(worker_loop.run(asset))
+        asyncio.run(worker_loop.run(asset, verbose=args.verbose))
     except KeyboardInterrupt:
         log("shutting down (keyboard interrupt)")
 

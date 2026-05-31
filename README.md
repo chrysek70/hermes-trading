@@ -112,6 +112,28 @@ up as `state/position.json.bak.<UTC-iso>`.
 uv run python scripts/test_multiasset_worker.py
 ```
 
+### Tick display — auto-switches with the strategy (Issue #17)
+
+The per-tick log line auto-selects fields based on the active strategy:
+
+- **SuperTrend mode** (`setups.supertrend.enabled: true`) — one line per asset showing the SuperTrend direction, line, and distance from price. RSI is hidden from the tick line but stays in the heartbeat and the closed-trade rows.
+- **Legacy v2 mode** (pullback / breakout) — preserved byte-for-byte; same `tick {asset} {price} rsi=… v{ver} pos=… regime=…` line as before.
+
+Sample SuperTrend ticks:
+
+```
+tick BTC/USDT close=73890.80 st=UP line=72150.22 dist=+2.41% v=v3-supertrend-01 pos=flat
+tick ETH/USDT close=3840.15 st=DOWN line=3922.40 dist=-2.10% v=v3-supertrend-01 pos=flat
+tick ETH/USDT close=3901.20 st=UP line=3720.00 dist=+4.87% v=v3-supertrend-01 pos=long setup=supertrend uPnL=+1.20%
+portfolio open=1/2  realized=+0.000%  unrealized=+0.601%
+```
+
+Add `--verbose` to append RSI back into the SuperTrend tick line for debugging:
+
+```bash
+uv run python -m hermes_trading.run --config state/live_multiasset.yaml --verbose
+```
+
 ## Current best out-of-sample result
 
 24-month walk-forward on BTC/USDT 4h, fees 10 bps/side + slippage 5 bps,

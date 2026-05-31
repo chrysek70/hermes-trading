@@ -22,7 +22,7 @@ worker's state files.
 | `run_top5_parallel.py` | Fixed-universe parallel portfolio of 5 SuperTrend(10, 3) instances (BTC, ETH, SOL, BNB, XRP). Equal risk per asset, up to 5 concurrent positions, no rotation. Optional per-asset HMM overlay; tests 4 variants. | #14 |
 | `run_funding_filter.py` | Funding-rate filter / sizing overlay. Loads BTC + ETH perpetuals funding from Binance Vision, forward-fills to 4h decision bars (causal), and blocks new longs when rolling 30-day funding percentile exceeds the threshold. 5 variants. | #7 |
 | `monitor_strategy_decay.py` | Live decay monitor. Reads `state/trades.jsonl`, computes rolling PF / DD / win-rate / consecutive-losses over configurable windows, compares to research-time baselines. Exit codes 0 / 1 / 2 for OK / DEGRADED / insufficient. Monitor-only. | #15 |
-| `test_multiasset_worker.py` | Self-test for the multi-asset live paper worker. No exchange, no network. Covers single-asset import sanity, config parse, portfolio cap, per-asset cap, legacy state migration with backup, corrupt-state tolerance, trade row schema, end-to-end `evaluate_tick`. | #16 |
+| `test_multiasset_worker.py` | Self-test for the multi-asset live paper worker. No exchange, no network. Covers single-asset import sanity, config parse, portfolio cap, per-asset cap, legacy state migration with backup, corrupt-state tolerance, trade row schema, end-to-end `evaluate_tick`, **and the SuperTrend tick-display auto-detect path (Issue #17)**. | #16, #17 |
 | `replay_live.py` | Replay mode — feed historical bars through the live engine at any speed. Educational / intuition-building tool. Does not trade, does not write to `state/`. | — |
 | `test_markov_regime.py` | Unit-style validators for the Markov module. Not an experiment. | — |
 

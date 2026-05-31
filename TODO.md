@@ -5,6 +5,12 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Live tick display auto-switch (Issue #17) — SuperTrend mode now
+  shows SuperTrend direction / line / distance instead of RSI; legacy
+  v2 display preserved byte-for-byte; `--verbose` adds RSI back for
+  debugging; heartbeat gains `supertrend_direction` /
+  `supertrend_line` / `supertrend_distance_pct`. 49/49 self-test
+  invariants pass; decay monitor unaffected.
 - ✓ Multi-asset live paper worker (Issue #16) — `--config state/live_multiasset.yaml`
   runs BTC/USDT + ETH/USDT in parallel. Per-asset position state,
   portfolio heartbeat, extended trade rows, legacy migration. 27/27

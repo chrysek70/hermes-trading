@@ -247,6 +247,113 @@ def main() -> int:
           new_pos2 is None, f"new_pos2={new_pos2}")
     print()
 
+    # --- 8. Display module (Issue #17)
+    print("8. Display auto-detection + formatting (Issue #17)")
+    from hermes_trading import display as display_mod
+
+    st_strategy = {"setups": {"supertrend": {"enabled": True}, "pullback": {"enabled": False}}}
+    v2_strategy = {"setups": {"pullback": {"enabled": True}, "breakout": {"enabled": True}}}
+    legacy_no_setups = {"regime": {"trend_ema_fast": 50}}
+    check("is_supertrend_active True on SuperTrend yaml",
+          display_mod.is_supertrend_active(st_strategy))
+    check("is_supertrend_active False on v2 yaml",
+          not display_mod.is_supertrend_active(v2_strategy))
+    check("is_supertrend_active False on missing-setups yaml",
+          not display_mod.is_supertrend_active(legacy_no_setups))
+
+    line_flat = display_mod.format_supertrend_tick(
+        asset="BTC/USDT", close=73890.80,
+        supertrend_direction=1, supertrend_line=72150.22,
+        strategy_version="v3-supertrend-01", position=None,
+    )
+    check("SuperTrend tick line: asset header",
+          line_flat.startswith("tick BTC/USDT close=73890.80"),
+          f"got {line_flat!r}")
+    check("SuperTrend tick line: shows st=UP",
+          " st=UP " in line_flat, f"got {line_flat!r}")
+    check("SuperTrend tick line: shows line=",
+          "line=72150.22" in line_flat, f"got {line_flat!r}")
+    check("SuperTrend tick line: shows signed dist%",
+          "dist=+2.41%" in line_flat, f"got {line_flat!r}")
+    check("SuperTrend tick line: shows v=v3-supertrend-01",
+          "v=v3-supertrend-01" in line_flat, f"got {line_flat!r}")
+    check("SuperTrend tick line: pos=flat when no position",
+          line_flat.rstrip().endswith("pos=flat"), f"got {line_flat!r}")
+    check("SuperTrend tick line: no rsi= when not verbose",
+          " rsi=" not in line_flat, f"got {line_flat!r}")
+
+    line_long = display_mod.format_supertrend_tick(
+        asset="ETH/USDT", close=3901.20,
+        supertrend_direction=1, supertrend_line=3720.00,
+        strategy_version="v3-supertrend-01",
+        position={"entry_price": 3855.00, "size": 1.0, "direction": "long", "setup": "supertrend"},
+    )
+    check("SuperTrend tick line (long): pos=long",
+          " pos=long " in line_long, f"got {line_long!r}")
+    check("SuperTrend tick line (long): setup=supertrend",
+          "setup=supertrend" in line_long, f"got {line_long!r}")
+    check("SuperTrend tick line (long): uPnL is positive",
+          " uPnL=+" in line_long, f"got {line_long!r}")
+
+    line_down = display_mod.format_supertrend_tick(
+        asset="ETH/USDT", close=3840.15,
+        supertrend_direction=-1, supertrend_line=3922.40,
+        strategy_version="v3-supertrend-01", position=None,
+    )
+    check("SuperTrend tick line: shows st=DOWN",
+          " st=DOWN " in line_down and "dist=-2.10%" in line_down,
+          f"got {line_down!r}")
+
+    line_warmup = display_mod.format_supertrend_tick(
+        asset="BTC/USDT", close=73890.80,
+        supertrend_direction=None, supertrend_line=None,
+        strategy_version="v3-supertrend-01", position=None,
+    )
+    check("SuperTrend tick line tolerates None (warmup)",
+          " st=? " in line_warmup and " line=? " in line_warmup
+          and " dist=? " in line_warmup, f"got {line_warmup!r}")
+
+    line_verbose = display_mod.format_supertrend_tick(
+        asset="BTC/USDT", close=73890.80,
+        supertrend_direction=1, supertrend_line=72150.22,
+        strategy_version="v3-supertrend-01", position=None,
+        rsi=43.9, verbose=True,
+    )
+    check("SuperTrend tick line in verbose mode includes rsi=43.9",
+          "rsi=43.9" in line_verbose, f"got {line_verbose!r}")
+
+    # Legacy RSI line preserved
+    legacy_line = display_mod.format_rsi_tick(
+        asset="BTC/USDT", close=73935.30, rsi=43.9,
+        strategy_version="10", position=None, regime_str="regime=off",
+    )
+    check("legacy RSI line: starts with 'tick BTC/USDT 73935.30'",
+          legacy_line.startswith("tick BTC/USDT 73935.30"),
+          f"got {legacy_line!r}")
+    check("legacy RSI line: contains rsi=43.9 v10",
+          "rsi=43.9 v10" in legacy_line, f"got {legacy_line!r}")
+    check("legacy RSI line: ends with pos=flat regime=off",
+          legacy_line.rstrip().endswith("pos=flat regime=off"),
+          f"got {legacy_line!r}")
+
+    # Heartbeat fields
+    hb_st = display_mod.supertrend_heartbeat_fields(73890.80, 1, 72150.22)
+    check("heartbeat: supertrend_direction == 'UP'",
+          hb_st["supertrend_direction"] == "UP", f"got {hb_st}")
+    check("heartbeat: supertrend_line is the float",
+          abs(hb_st["supertrend_line"] - 72150.22) < 1e-9, f"got {hb_st}")
+    expected_dist = (73890.80 - 72150.22) / 72150.22 * 100.0
+    check("heartbeat: supertrend_distance_pct matches (close-line)/line*100",
+          abs(hb_st["supertrend_distance_pct"] - expected_dist) < 1e-9,
+          f"got {hb_st['supertrend_distance_pct']}  expected {expected_dist}")
+    hb_warm = display_mod.supertrend_heartbeat_fields(73890.80, None, None)
+    check("heartbeat: warmup gives Nones",
+          hb_warm["supertrend_direction"] is None
+          and hb_warm["supertrend_line"] is None
+          and hb_warm["supertrend_distance_pct"] is None,
+          f"got {hb_warm}")
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:

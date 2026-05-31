@@ -433,6 +433,41 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Live tick display auto-switch (Issue #17) — shipped
+
+The live-worker per-tick output now auto-selects fields based on the
+active strategy. With SuperTrend enabled (`setups.supertrend.enabled:
+true`), the tick line shows SuperTrend direction, line, and distance
+from price; RSI is hidden from the line but still computed, still in
+the heartbeat JSON, and still in the closed-trade rows. With the
+legacy v2 long-short strategy active (pullback / breakout), the tick
+line is preserved byte-for-byte from before this change.
+
+Implementation: a new pure-function module `hermes_trading/display.py`
+holds the `is_supertrend_active` check, the tick formatters
+(`format_supertrend_tick`, `format_rsi_tick`), and the
+`supertrend_heartbeat_fields` builder. Both `loop.py` (single-asset)
+and `multi_loop.py` (multi-asset) call into it; no trading logic was
+touched.
+
+Heartbeat additions per asset (and at top level in single-asset mode):
+`supertrend_direction` (`"UP"` / `"DOWN"` / `None`), `supertrend_line`
+(float / `None`), `supertrend_distance_pct` (signed percent / `None`).
+Warmup bars correctly produce `None` so consumers can detect
+indicator-not-ready without crashing.
+
+A `--verbose` (`-v`) CLI flag appends `rsi=...` to the SuperTrend tick
+line for debugging. Off by default.
+
+Self-test extended from 27 to 49 invariants. Decay monitor self-test
+unchanged at 14/14. Trade row schema unchanged — decay monitor still
+passes because no legacy field was renamed or removed.
+
+Motivation in one line: the previous tick line showed RSI as the
+headline metric even when SuperTrend was the active setup, which made
+the screen look like the strategy was stuck whenever RSI was flat. The
+auto-switch surfaces the indicator that is actually driving entries.
+
 ## Multi-asset live paper worker (Issue #16) — shipped
 
 Live worker refactored from single-asset to a parallel-portfolio

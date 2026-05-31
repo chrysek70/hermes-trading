@@ -29,6 +29,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import STATE_DIR, append_jsonl, load_yaml, log, now_iso, write_json
+from . import display as display_mod
 from . import positions
 from . import signals
 from .adapters import SchemaError, price as price_adapter
@@ -191,10 +192,15 @@ async def _with_retries(coro_factory, name: str, attempts: int = 3):
     raise last_exc  # type: ignore[misc]
 
 
-async def run(cfg_path: str | Path, state_dir: Path | None = None) -> None:
+async def run(
+    cfg_path: str | Path,
+    state_dir: Path | None = None,
+    verbose: bool = False,
+) -> None:
     """Run the multi-asset paper worker indefinitely.
 
     ``cfg_path`` is the multi-asset yaml (e.g. ``state/live_multiasset.yaml``).
+    ``verbose`` adds extra debug fields (RSI) to the SuperTrend tick lines.
     """
     state_dir = state_dir or STATE_DIR
     cfg_path = Path(cfg_path)
@@ -258,6 +264,8 @@ async def run(cfg_path: str | Path, state_dir: Path | None = None) -> None:
         version = strategy.get("version", "?")
 
         per_asset_hb: dict[str, dict] = {}
+        asset_row_for_display: dict[str, dict] = {}
+        st_mode = display_mod.is_supertrend_active(strategy)
 
         for asset in assets:
             if asset in broken:
@@ -342,7 +350,7 @@ async def run(cfg_path: str | Path, state_dir: Path | None = None) -> None:
             unrl = 0.0
             if cur_pos is not None:
                 unrl = (last_price - cur_pos["entry_price"]) / cur_pos["entry_price"] * cur_pos["size"]
-            per_asset_hb[asset] = {
+            asset_hb = {
                 "last_price": last_price,
                 "rsi": rsi_val,
                 "position_open": cur_pos is not None,
@@ -352,6 +360,22 @@ async def run(cfg_path: str | Path, state_dir: Path | None = None) -> None:
                 "setup": cur_pos.get("setup") if cur_pos else None,
                 "unrealized_pnl_pct": unrl,
                 "strategy_version": version,
+            }
+            # SuperTrend-specific heartbeat fields (Issue #17). Always
+            # populated when the indicator columns exist on the row;
+            # values are None during indicator warmup.
+            asset_hb.update(display_mod.supertrend_heartbeat_fields(
+                last_price,
+                row.get("supertrend_direction"),
+                row.get("supertrend_line"),
+            ))
+            per_asset_hb[asset] = asset_hb
+            asset_row_for_display[asset] = {
+                "close": last_price,
+                "rsi": rsi_val,
+                "supertrend_direction": row.get("supertrend_direction"),
+                "supertrend_line": row.get("supertrend_line"),
+                "position": cur_pos,
             }
 
         if assets and len(broken) == len(assets):
@@ -377,17 +401,40 @@ async def run(cfg_path: str | Path, state_dir: Path | None = None) -> None:
             },
         })
 
-        # condensed per-tick log line
-        bits = []
-        for a in assets:
-            hb = per_asset_hb.get(a, {})
-            lp = hb.get("last_price")
-            lp_str = f"{lp:.2f}" if isinstance(lp, (int, float)) else "—"
-            posflag = "↑long" if hb.get("position_open") else "flat"
-            bits.append(f"{a.split('/')[0]}:{lp_str}({posflag})")
-        log(f"tick portfolio open={open_count}/{max_open} "
-            f"realized={realized_pnl_pct:+.3f}%  "
-            f"unrealized={unrl_portfolio*100:+.3f}%  "
-            + "  ".join(bits))
+        # ---- per-tick output ----
+        if st_mode:
+            # SuperTrend mode: one line per asset showing SuperTrend
+            # status (Issue #17). Portfolio summary follows so the
+            # operator still sees aggregate state at a glance.
+            for a in assets:
+                disp = asset_row_for_display.get(a)
+                if disp is None:
+                    continue
+                log(display_mod.format_supertrend_tick(
+                    asset=a,
+                    close=disp["close"],
+                    supertrend_direction=disp["supertrend_direction"],
+                    supertrend_line=disp["supertrend_line"],
+                    strategy_version=version,
+                    position=disp["position"],
+                    rsi=disp.get("rsi"),
+                    verbose=verbose,
+                ))
+            log(f"portfolio open={open_count}/{max_open}  "
+                f"realized={realized_pnl_pct:+.3f}%  "
+                f"unrealized={unrl_portfolio*100:+.3f}%")
+        else:
+            # legacy condensed summary — unchanged for v2 strategies
+            bits = []
+            for a in assets:
+                hb = per_asset_hb.get(a, {})
+                lp = hb.get("last_price")
+                lp_str = f"{lp:.2f}" if isinstance(lp, (int, float)) else "—"
+                posflag = "↑long" if hb.get("position_open") else "flat"
+                bits.append(f"{a.split('/')[0]}:{lp_str}({posflag})")
+            log(f"tick portfolio open={open_count}/{max_open} "
+                f"realized={realized_pnl_pct:+.3f}%  "
+                f"unrealized={unrl_portfolio*100:+.3f}%  "
+                + "  ".join(bits))
 
         await asyncio.sleep(poll_seconds)

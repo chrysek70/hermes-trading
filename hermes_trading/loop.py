@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from . import STATE_DIR, append_jsonl, load_yaml, log, now_iso, read_jsonl, write_json
+from . import display as display_mod
 from . import reflect as reflect_mod
 from . import signals
 from .adapters import SchemaError, validate
@@ -182,7 +183,7 @@ def _bars_held(position: dict, timeframe: str) -> int:
     return int((datetime.now(timezone.utc) - opened).total_seconds() / sec)
 
 
-async def run(asset: str) -> None:
+async def run(asset: str, verbose: bool = False) -> None:
     log(f"Booting hermes-trading worker — asset={asset}")
     goal = load_yaml(STATE_DIR / "goal.yaml")
     timeframe = goal.get("timeframe", "4h")
@@ -341,43 +342,64 @@ async def run(asset: str) -> None:
                         _write_reflection_marker(last_reflected_at)
                         await _trigger_reflection()
 
-            write_json(
-                STATE_DIR / "heartbeat.json",
-                {
-                    "ts": now_iso(),
-                    "asset": asset,
-                    "timeframe": timeframe,
-                    "strategy_version": strategy.get("version"),
-                    "last_price": last,
-                    "rsi": rsi_val,
-                    "position_open": position is not None,
-                    "position_direction": position.get("direction") if position else None,
-                },
-            )
+            heartbeat = {
+                "ts": now_iso(),
+                "asset": asset,
+                "timeframe": timeframe,
+                "strategy_version": strategy.get("version"),
+                "last_price": last,
+                "rsi": rsi_val,
+                "position_open": position is not None,
+                "position_direction": position.get("direction") if position else None,
+            }
+            # SuperTrend-specific heartbeat fields (Issue #17). Always
+            # populated when the indicator columns exist on the row;
+            # values are None during indicator warmup.
+            heartbeat.update(display_mod.supertrend_heartbeat_fields(
+                last,
+                row.get("supertrend_direction"),
+                row.get("supertrend_line"),
+            ))
+            write_json(STATE_DIR / "heartbeat.json", heartbeat)
 
-            last_str = f"{last:.2f}"
-            rsi_str = f"{rsi_val:.1f}" if rsi_val is not None else "n/a"
-            if position is not None:
-                direction = position.get("direction", "long")
-                if direction == "long":
-                    chg = (last - position["entry_price"]) / position["entry_price"]
-                    arrow = "↑"
-                else:
-                    chg = (position["entry_price"] - last) / position["entry_price"]
-                    arrow = "↓"
-                pnl_ret = chg * position["size"]
-                pnl_usd = pnl_ret * PAPER_NOTIONAL_USD
-                color = "green" if pnl_ret >= 0 else "red"
-                pos_str = (
-                    f"{arrow}{direction} @ {position['entry_price']:.2f} "
-                    f"[{color}]{pnl_ret * 100:+.3f}%  ${pnl_usd:+.2f}[/{color}]"
-                )
+            # ---- per-tick log line (Issue #17: auto-detect display) ----
+            if display_mod.is_supertrend_active(strategy):
+                log(display_mod.format_supertrend_tick(
+                    asset=asset,
+                    close=last,
+                    supertrend_direction=row.get("supertrend_direction"),
+                    supertrend_line=row.get("supertrend_line"),
+                    strategy_version=strategy.get("version"),
+                    position=position,
+                    rsi=rsi_val,
+                    verbose=verbose,
+                ))
             else:
-                pos_str = "flat"
-            log(
-                f"tick {asset} {last_str} rsi={rsi_str} v{strategy.get('version')} "
-                f"pos={pos_str} {regime_str}"
-            )
+                # legacy v2 RSI display preserved verbatim — including
+                # color tags and the regime suffix.
+                last_str = f"{last:.2f}"
+                rsi_str = f"{rsi_val:.1f}" if rsi_val is not None else "n/a"
+                if position is not None:
+                    direction = position.get("direction", "long")
+                    if direction == "long":
+                        chg = (last - position["entry_price"]) / position["entry_price"]
+                        arrow = "↑"
+                    else:
+                        chg = (position["entry_price"] - last) / position["entry_price"]
+                        arrow = "↓"
+                    pnl_ret = chg * position["size"]
+                    pnl_usd = pnl_ret * PAPER_NOTIONAL_USD
+                    color = "green" if pnl_ret >= 0 else "red"
+                    pos_str = (
+                        f"{arrow}{direction} @ {position['entry_price']:.2f} "
+                        f"[{color}]{pnl_ret * 100:+.3f}%  ${pnl_usd:+.2f}[/{color}]"
+                    )
+                else:
+                    pos_str = "flat"
+                log(
+                    f"tick {asset} {last_str} rsi={rsi_str} v{strategy.get('version')} "
+                    f"pos={pos_str} {regime_str}"
+                )
 
         except SchemaError as exc:
             log(f"[red]SCHEMA DRIFT — halting:[/red] {exc}")
