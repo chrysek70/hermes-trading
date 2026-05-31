@@ -38,6 +38,15 @@ from .adapters import SchemaError, price as price_adapter
 POLL_DEFAULT = int(os.getenv("HERMES_POLL_SECONDS", "10"))
 PAPER_NOTIONAL_USD = float(os.getenv("HERMES_PAPER_NOTIONAL_USD", "1000"))
 
+# ---------- live-vs-research fill-accounting parity (Issue #29) -------------
+# These are the EXACT constants the research backtest (backtest.py) and replay
+# (scripts/replay_live.py) use as their defaults. The live worker now applies
+# the same convention so live paper PnL is directly comparable to research.
+# Both can be overridden per-config (see ``run`` below: ``fee_per_side`` and
+# ``slippage`` keys in the multi-asset yaml).
+RESEARCH_FEE_PER_SIDE = 0.001    # 10 bp / side, matches backtest default
+RESEARCH_SLIPPAGE = 0.0005       # 5 bp, matches backtest default
+
 _TIMEFRAME_SECONDS = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
     "1h": 3600, "4h": 14400, "1d": 86400,
@@ -170,12 +179,25 @@ def build_trade_row(
     exit_reason: str,
     bars_held: int,
     strategy_version: str | None,
+    fee: float = RESEARCH_FEE_PER_SIDE,
 ) -> dict:
-    """Construct a closed-trade record. Includes both the new spec
-    field names (entry_time / exit_time / return_pct / net_return_pct /
-    position_size / holding_bars) and the legacy field names
-    (opened_at / closed_at / return) for backward compatibility with
-    existing readers like ``scripts/monitor_strategy_decay.py``."""
+    """Construct a closed-trade record.
+
+    Issue #29 — live-vs-research fill-accounting parity: ``net_return_pct``
+    (and the legacy ``return``) now equal ``(ret_pct - 2 * fee) * size``,
+    matching ``backtest._run_state_machine``. Slippage is expected to be
+    embedded in ``entry_price`` and ``exit_price`` by the caller, exactly
+    as the research model does. Callers that wish to record the
+    pre-slippage prices for diagnostics can attach
+    ``entry_price_pre_slip`` / ``exit_price_pre_slip`` on the position
+    dict.
+
+    Includes both the new spec field names (entry_time / exit_time /
+    return_pct / net_return_pct / position_size / holding_bars) and the
+    legacy field names (opened_at / closed_at / return) for backward
+    compatibility with existing readers like
+    ``scripts/monitor_strategy_decay.py``.
+    """
     entry_price = float(position["entry_price"])
     direction = position.get("direction", "long")
     size = float(position.get("size", 1.0))
@@ -183,7 +205,7 @@ def build_trade_row(
         ret_pct = (exit_price - entry_price) / entry_price
     else:
         ret_pct = (entry_price - exit_price) / entry_price
-    net = ret_pct * size
+    net = (ret_pct - 2 * float(fee)) * size
     now = now_iso()
     return {
         "status": "closed",
@@ -205,6 +227,12 @@ def build_trade_row(
         "exit_reason": exit_reason,
         "holding_bars": bars_held,
         "strategy_version": strategy_version,
+        # Issue #29 parity diagnostics — pass through pre-slippage prices and
+        # the fee that was actually deducted so downstream tools (decay
+        # monitor, replay, audits) can reconcile against the research model.
+        "fee_per_side": float(fee),
+        "entry_price_pre_slip": position.get("entry_price_pre_slip"),
+        "exit_price_pre_slip": position.get("exit_price_pre_slip"),
     }
 
 
@@ -231,11 +259,19 @@ def evaluate_tick(
     max_open_positions: int,
     size_per_asset: float,
     strategy_version: str | None,
+    fee: float = RESEARCH_FEE_PER_SIDE,
+    slippage: float = RESEARCH_SLIPPAGE,
 ) -> tuple[dict | None, dict | None]:
     """Pure function. Returns (new_position_or_None, closed_trade_or_None).
 
     No I/O, no globals — used by the self-test to exercise the engine
-    without mocking the price adapter."""
+    without mocking the price adapter.
+
+    Issue #29 — applies the research fill convention: entries fill at
+    ``close * (1 ± slippage)``; non-stop exits fill at ``close * (1 ∓
+    slippage)``; stop exits fill at ``stop * (1 ∓ slippage)``;
+    ``net_return_pct`` deducts ``2 * fee * size``.
+    """
     if position is not None:
         bars_held = _bars_held(position, strategy_timeframe_seconds(strategy))
         direction = position.get("direction", "long")
@@ -244,9 +280,21 @@ def evaluate_tick(
         else:
             reason = signals.short_exit(row, position, strategy, bars_held)
         if reason:
-            exit_price = float(row["close"])
+            close_price = float(row["close"])
+            if reason == "stop":
+                base = float(position["stop"])
+            else:
+                base = close_price
+            if direction == "long":
+                exit_price = base * (1.0 - float(slippage))
+            else:
+                exit_price = base * (1.0 + float(slippage))
+            # Record the pre-slippage close on the position so the trade
+            # row can carry it through for diagnostics.
+            position = {**position, "exit_price_pre_slip": base}
             return None, build_trade_row(asset, position, exit_price,
-                                         reason, bars_held, strategy_version)
+                                         reason, bars_held, strategy_version,
+                                         fee=fee)
         return position, None
 
     # flat: try entry, respecting the portfolio cap
@@ -256,9 +304,12 @@ def evaluate_tick(
     setup = signals.long_entry(row, strategy)
     if not setup:
         return None, None
+    close_price = float(row["close"])
+    entry_price = close_price * (1.0 + float(slippage))   # long taker
     new_pos = {
         "asset": asset,
-        "entry_price": float(row["close"]),
+        "entry_price": entry_price,
+        "entry_price_pre_slip": close_price,
         "opened_at": now_iso(),
         "size": float(size_per_asset),
         "direction": "long",
@@ -337,9 +388,18 @@ async def run(
     heartbeat_schema = cfg.get("heartbeat_schema", "multiasset-v1")
     sec_per_bar = _TIMEFRAME_SECONDS.get(timeframe, 14400)
 
+    # Issue #29 — fill-accounting parity with research (backtest.py). Defaults
+    # match the research convention: 10 bp fee/side, 5 bp slippage embedded in
+    # fills. Operators on a different venue can override via the live config
+    # (``fee_per_side``, ``slippage``) without code change.
+    fee_per_side = float(cfg.get("fee_per_side", RESEARCH_FEE_PER_SIDE))
+    slippage = float(cfg.get("slippage", RESEARCH_SLIPPAGE))
+
     log(f"Booting hermes-trading MULTI-ASSET paper worker")
     log(f"  assets={assets}  timeframe={timeframe}  max_open={max_open}")
     log(f"  strategy={strategy_path}  size_per_asset={size_per_asset}")
+    log(f"  fee_per_side={fee_per_side}  slippage={slippage}  "
+        f"(Issue #29: fills match research convention)")
 
     # ---- funding overlay (Issue #21) ----
     funding_cfg = (cfg.get("funding_filter") or {})
@@ -494,9 +554,13 @@ async def run(
                         else:
                             opened = True
                         if opened:
+                            # Issue #29: live entry fill matches the research
+                            # convention — close + adverse slippage.
+                            entry_fill = last_price * (1.0 + slippage)
                             new_pos = {
                                 "asset": asset,
-                                "entry_price": last_price,
+                                "entry_price": entry_fill,
+                                "entry_price_pre_slip": last_price,
                                 "opened_at": now_iso(),
                                 "size": size_per_asset,
                                 "direction": "long",
@@ -511,8 +575,9 @@ async def run(
                             }
                             positions_state[asset] = new_pos
                             positions.save_position(asset, new_pos, state_dir)
-                            log(f"[green]ENTER long[/green] {asset} @ {last_price:.2f} "
-                                f"({setup_l}, stop={new_pos['stop']:.2f}, size={size_per_asset})")
+                            log(f"[green]ENTER long[/green] {asset} @ {entry_fill:.2f} "
+                                f"({setup_l}, stop={new_pos['stop']:.2f}, size={size_per_asset}, "
+                                f"slip={slippage*1e4:.1f}bp)")
 
                     if not opened and positions_state[asset] is None:
                         # short side also evaluated on signal_row (Issue #24)
@@ -539,9 +604,13 @@ async def run(
                                     log(f"[yellow]funding data missing for {asset}; "
                                         f"short allowed by fail-open policy[/yellow]")
                             if short_ok:
+                                # Issue #29: short entry fill = close − adverse
+                                # slippage, mirroring backtest._run_state_machine.
+                                entry_fill = last_price * (1.0 - slippage)
                                 new_pos = {
                                     "asset": asset,
-                                    "entry_price": last_price,
+                                    "entry_price": entry_fill,
+                                    "entry_price_pre_slip": last_price,
                                     "opened_at": now_iso(),
                                     "size": size_per_asset,
                                     "direction": "short",
@@ -556,8 +625,9 @@ async def run(
                                 }
                                 positions_state[asset] = new_pos
                                 positions.save_position(asset, new_pos, state_dir)
-                                log(f"[red]ENTER short[/red] {asset} @ {last_price:.2f} "
-                                    f"({setup_s}, stop={new_pos['stop']:.2f}, size={size_per_asset})")
+                                log(f"[red]ENTER short[/red] {asset} @ {entry_fill:.2f} "
+                                    f"({setup_s}, stop={new_pos['stop']:.2f}, size={size_per_asset}, "
+                                    f"slip={slippage*1e4:.1f}bp)")
             else:
                 bars_held = int((pd.Timestamp.now(tz="UTC") -
                                  pd.Timestamp(position["opened_at"])).total_seconds()
@@ -586,15 +656,32 @@ async def run(
                         if dhigh is not None and not pd.isna(dhigh) and float(dhigh) >= position["stop"]:
                             reason = "stop"
                 if reason:
-                    trade = build_trade_row(asset, position, last_price,
-                                            reason, bars_held, version)
+                    # Issue #29: exit fill matches the research convention.
+                    # Stop exits fill at the stop price (the value
+                    # signals.long_exit / short_exit ratcheted up to); other
+                    # exits fill at the current bar's close. Slippage is
+                    # adverse to position direction in both cases.
+                    if reason == "stop":
+                        base_exit = float(position["stop"])
+                    else:
+                        base_exit = last_price
+                    if direction == "long":
+                        exit_fill = base_exit * (1.0 - slippage)
+                    else:
+                        exit_fill = base_exit * (1.0 + slippage)
+                    position = {**position, "exit_price_pre_slip": base_exit}
+                    trade = build_trade_row(asset, position, exit_fill,
+                                            reason, bars_held, version,
+                                            fee=fee_per_side)
                     # carry funding-at-entry metadata onto the closed-trade row
                     if "funding_rate_at_entry" in position:
                         trade["funding_rate_at_entry"] = position["funding_rate_at_entry"]
                         trade["funding_percentile_at_entry"] = position.get("funding_percentile_at_entry")
                     append_jsonl(state_dir / "trades.jsonl", trade)
-                    log(f"[cyan]EXIT {direction}[/cyan] {asset} @ {last_price:.2f} "
-                        f"({reason}, return={trade['net_return_pct']:+.4f})")
+                    log(f"[cyan]EXIT {direction}[/cyan] {asset} @ {exit_fill:.2f} "
+                        f"({reason}, return={trade['net_return_pct']:+.4f}, "
+                        f"fee={fee_per_side*1e4:.1f}bp/side, "
+                        f"slip={slippage*1e4:.1f}bp)")
                     realized_pnl_pct += trade["net_return_pct"] * 100.0
                     positions_state[asset] = None
                     positions.clear_position(asset, state_dir)

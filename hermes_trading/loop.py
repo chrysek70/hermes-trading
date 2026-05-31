@@ -30,6 +30,7 @@ from .adapters import news as news_adapter
 from .adapters import onchain as onchain_adapter
 from .adapters import price as price_adapter
 from .markov_regime import MarkovRegimeModel
+from .multi_loop import RESEARCH_FEE_PER_SIDE, RESEARCH_SLIPPAGE
 
 POLL_SECONDS = int(os.getenv("HERMES_POLL_SECONDS", "10"))
 RETRY_ATTEMPTS = 3
@@ -37,6 +38,12 @@ CIRCUIT_BREAK_AFTER = 5
 CONTEXT_EVERY_SECONDS = int(os.getenv("HERMES_CONTEXT_SECONDS", "300"))
 REGIME_EVERY_SECONDS = int(os.getenv("HERMES_REGIME_SECONDS", "300"))
 PAPER_NOTIONAL_USD = float(os.getenv("HERMES_PAPER_NOTIONAL_USD", "1000"))
+
+# Issue #29 — single-asset legacy live path uses the same fill-accounting
+# constants as the multi-asset path. Constants are imported above from
+# multi_loop so the two paths can never drift apart.
+FEE_PER_SIDE = float(os.getenv("HERMES_FEE_PER_SIDE", str(RESEARCH_FEE_PER_SIDE)))
+SLIPPAGE = float(os.getenv("HERMES_SLIPPAGE", str(RESEARCH_SLIPPAGE)))
 
 # Seconds per bar by timeframe (for converting wall-clock into bars_held).
 _TIMEFRAME_SECONDS = {
@@ -268,8 +275,12 @@ async def run(asset: str, verbose: bool = False) -> None:
                 if regime_allowed_long:
                     setup_l = signals.long_entry(signal_row, strategy)
                     if setup_l:
+                        # Issue #29: fill at close + adverse slippage,
+                        # matching backtest._run_state_machine.
+                        entry_fill_l = last * (1.0 + SLIPPAGE)
                         position = {
-                            "entry_price": last,
+                            "entry_price": entry_fill_l,
+                            "entry_price_pre_slip": last,
                             "opened_at": now_iso(),
                             "size": float(strategy["risk"].get("position_size_r", 0.5)),
                             "direction": "long",
@@ -282,8 +293,10 @@ async def run(asset: str, verbose: bool = False) -> None:
                 if fired_dir is None:
                     setup_s = signals.short_entry(signal_row, strategy)
                     if setup_s:
+                        entry_fill_s = last * (1.0 - SLIPPAGE)
                         position = {
-                            "entry_price": last,
+                            "entry_price": entry_fill_s,
+                            "entry_price_pre_slip": last,
                             "opened_at": now_iso(),
                             "size": float(strategy["risk"].get("position_size_r", 0.5)),
                             "direction": "short",
@@ -327,11 +340,22 @@ async def run(asset: str, verbose: bool = False) -> None:
                         if dhigh is not None and not pd.isna(dhigh) and float(dhigh) >= position["stop"]:
                             reason = "stop"
                 if reason:
-                    if direction == "long":
-                        ret_pct = (last - position["entry_price"]) / position["entry_price"]
+                    # Issue #29: fill-accounting parity with research
+                    # (backtest.py). Stop exits fill at the stop price; other
+                    # exits fill at the current bar's close. Slippage is
+                    # adverse to position direction; fee is deducted in
+                    # return space (2 × fee per round-trip × size).
+                    if reason == "stop":
+                        base_exit = float(position["stop"])
                     else:
-                        ret_pct = (position["entry_price"] - last) / position["entry_price"]
-                    trade_return = ret_pct * position["size"]
+                        base_exit = last
+                    if direction == "long":
+                        exit_fill = base_exit * (1.0 - SLIPPAGE)
+                        ret_pct = (exit_fill - position["entry_price"]) / position["entry_price"]
+                    else:
+                        exit_fill = base_exit * (1.0 + SLIPPAGE)
+                        ret_pct = (position["entry_price"] - exit_fill) / position["entry_price"]
+                    trade_return = (ret_pct - 2.0 * FEE_PER_SIDE) * position["size"]
                     closed_at_iso = now_iso()
                     trade = {
                         "status": "closed",
@@ -342,7 +366,7 @@ async def run(asset: str, verbose: bool = False) -> None:
                         "opened_at": position["opened_at"],
                         "closed_at": closed_at_iso,
                         "entry_price": position["entry_price"],
-                        "exit_price": last,
+                        "exit_price": exit_fill,
                         "return": trade_return,
                         "exit_reason": reason,
                         "strategy_version": strategy.get("version"),
@@ -353,6 +377,10 @@ async def run(asset: str, verbose: bool = False) -> None:
                         "net_return_pct": trade_return,
                         "position_size": float(position.get("size", 1.0)),
                         "holding_bars": bars_held,
+                        # Issue #29 parity diagnostics
+                        "fee_per_side": FEE_PER_SIDE,
+                        "entry_price_pre_slip": position.get("entry_price_pre_slip"),
+                        "exit_price_pre_slip": base_exit,
                     }
                     append_jsonl(STATE_DIR / "trades.jsonl", trade)
                     log(

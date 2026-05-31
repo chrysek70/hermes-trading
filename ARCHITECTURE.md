@@ -137,14 +137,22 @@ fills, persist position state, recover from restart.
 - Trade row schema in `state/trades.jsonl` — kept stable so
   downstream consumers like the decay monitor don't break.
 
-**Modeling asymmetry currently in the codebase:**
+**Modeling asymmetry (closed in Issue #29):**
 
 - Backtest models entry / stop / exit fill slippage (10 bps fee /
   side + 5 bps slippage).
-- **Live worker simulates fills at the bar's close with no slippage
-  or fee deduction.** This means live paper PnL overstates net
-  edge by ~25 bps per round-trip vs the backtested numbers. Listed
-  in the execution backlog.
+- Replay matches the backtest convention (Issue #26).
+- Live worker now ALSO matches: entries fill at `close × (1 ± slip)`,
+  stops at `stop × (1 ∓ slip)`, non-stop exits at `close × (1 ∓
+  slip)`, and `net_return_pct` deducts `2 × fee × size` in return
+  space. Constants are configurable via `fee_per_side` and
+  `slippage` in the multi-asset yaml; defaults
+  (`RESEARCH_FEE_PER_SIDE = 0.001`, `RESEARCH_SLIPPAGE = 0.0005`)
+  match the research backtest exactly.
+- **Backtest + replay + live now produce matching entry price,
+  exit price, and net_return_pct accounting within rounding
+  tolerance.** Issue #29 added parity tests (Section 14 of
+  `scripts/test_multiasset_worker.py`) verifying this directly.
 
 **No real-money execution path.** Adapters are read-only. There
 is no broker / exchange WRITE code anywhere.

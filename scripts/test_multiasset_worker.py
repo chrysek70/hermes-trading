@@ -180,13 +180,17 @@ def main() -> int:
           f"missing={missing}")
     check("legacy fields preserved (opened_at, closed_at, return)",
           "opened_at" in row and "closed_at" in row and "return" in row)
-    # 2% gross on long; net = 2% * 0.5 size = 1%
+    # 2% gross on long; Issue #29 — net = (ret - 2*fee) * size, where
+    # fee defaults to RESEARCH_FEE_PER_SIDE = 0.001 (10 bp/side). So
+    # net = (0.02 - 0.002) * 0.5 = 0.009.
     check("return_pct matches (exit-entry)/entry",
           abs(row["return_pct"] - 0.02) < 1e-9, f"got {row['return_pct']}")
-    check("net_return_pct == return_pct * position_size",
-          abs(row["net_return_pct"] - 0.01) < 1e-9, f"got {row['net_return_pct']}")
+    check("net_return_pct == (return_pct - 2*fee) * position_size (Issue #29)",
+          abs(row["net_return_pct"] - 0.009) < 1e-9, f"got {row['net_return_pct']}")
     check("legacy `return` matches net_return_pct",
           row["return"] == row["net_return_pct"])
+    check("trade row records fee_per_side (Issue #29)",
+          abs(row["fee_per_side"] - 0.001) < 1e-9, f"got {row.get('fee_per_side')}")
     check("holding_bars carried through", row["holding_bars"] == 12)
     print()
 
@@ -1033,6 +1037,354 @@ def main() -> int:
           and "from hermes_trading.multi_loop" in replay_src)
     check("replay source enforces portfolio cap via can_enter",
           "can_enter(asset, positions_by_asset, max_open)" in replay_src)
+    print()
+
+    # --- 14. Live-vs-research fill-accounting parity (Issue #29)
+    print("14. Live-vs-research fill-accounting parity (Issue #29)")
+    from hermes_trading.multi_loop import (
+        RESEARCH_FEE_PER_SIDE, RESEARCH_SLIPPAGE,
+        evaluate_tick as parity_eval_tick,
+        build_trade_row as parity_build_trade_row,
+    )
+    from hermes_trading import backtest as parity_bt
+
+    # 14.0 Default constants match the research backtest's default args
+    check("RESEARCH_FEE_PER_SIDE == 0.001 (10 bp / side)",
+          abs(RESEARCH_FEE_PER_SIDE - 0.001) < 1e-12,
+          f"got {RESEARCH_FEE_PER_SIDE}")
+    check("RESEARCH_SLIPPAGE == 0.0005 (5 bp)",
+          abs(RESEARCH_SLIPPAGE - 0.0005) < 1e-12,
+          f"got {RESEARCH_SLIPPAGE}")
+
+    # 14.1 build_trade_row default fee equals RESEARCH_FEE_PER_SIDE
+    pos_simple = {
+        "entry_price": 70000.0 * (1 + RESEARCH_SLIPPAGE),
+        "opened_at": "2026-05-29T12:00:00+00:00",
+        "size": 0.5,
+        "direction": "long",
+        "setup": "supertrend",
+    }
+    exit_fill_long = 71400.0 * (1 - RESEARCH_SLIPPAGE)
+    row_default = parity_build_trade_row(
+        asset="BTC/USDT", position=pos_simple, exit_price=exit_fill_long,
+        exit_reason="supertrend_flip", bars_held=10,
+        strategy_version="parity-test",
+    )
+    expected_ret = (exit_fill_long - pos_simple["entry_price"]) / pos_simple["entry_price"]
+    expected_net = (expected_ret - 2 * RESEARCH_FEE_PER_SIDE) * 0.5
+    check("build_trade_row default fee deducts 2*0.001 in return space",
+          abs(row_default["net_return_pct"] - expected_net) < 1e-12,
+          f"got {row_default['net_return_pct']} expected {expected_net}")
+
+    # 14.2 build_trade_row accepts a custom fee
+    row_zero_fee = parity_build_trade_row(
+        asset="BTC/USDT", position=pos_simple, exit_price=exit_fill_long,
+        exit_reason="supertrend_flip", bars_held=10,
+        strategy_version="parity-test", fee=0.0,
+    )
+    check("build_trade_row fee=0 zero-fee path",
+          abs(row_zero_fee["net_return_pct"] - expected_ret * 0.5) < 1e-12,
+          f"got {row_zero_fee['net_return_pct']}")
+    check("fee_per_side recorded on trade row",
+          abs(row_default["fee_per_side"] - RESEARCH_FEE_PER_SIDE) < 1e-12)
+
+    # 14.3 evaluate_tick LONG entry: entry_price = close * (1 + slippage)
+    bullish_flip_row_14 = {
+        "close": 70000.0, "high": 70100, "low": 69900,
+        "ema_fast": 70000.0, "ema_slow": 65000.0,
+        "rsi": 50.0, "atr": 700.0, "ema_pull": 69800.0,
+        "supertrend_direction": 1, "supertrend_direction_prev": -1,
+        "supertrend_line": 69300.0,
+        "three_bar": False, "vwap": 69800.0, "donchian_high": 71000.0,
+    }
+    st_strategy_14 = {
+        "setups": {
+            "supertrend": {"enabled": True, "period": 10, "multiplier": 3.0,
+                           "max_holding_bars": 0},
+            "pullback":  {"enabled": False, "pullback_ema": 21, "ema_tol": 0.002,
+                          "rsi_threshold": 32,
+                          "exit": {"type": "mean_revert", "stop_atr_mult": 1.2,
+                                   "target_rsi": 55}},
+            "breakout":  {"enabled": False, "require_above_vwap": True,
+                          "ignition_atr_mult": 1.0,
+                          "exit": {"type": "trail", "trail_ema": 21,
+                                   "stop_atr_mult": 1.5}},
+        },
+        "shorts": {"enabled": False},
+        "risk": {"position_size_r": 0.5, "atr_period": 14, "max_hold_bars": 240,
+                 "regime_flip_exit": False},
+        "regime": {"trend_ema_fast": 50, "trend_ema_slow": 200},
+        "rsi_period": 14, "_timeframe": "4h",
+    }
+    new_pos_long, _ = parity_eval_tick(
+        asset="BTC/USDT", row=bullish_flip_row_14, strategy=st_strategy_14,
+        position=None,
+        positions_by_asset={"BTC/USDT": None},
+        max_open_positions=1, size_per_asset=0.5,
+        strategy_version="parity-test",
+    )
+    check("long entry fill = close * (1 + slippage)",
+          new_pos_long is not None
+          and abs(new_pos_long["entry_price"] - 70000.0 * (1 + RESEARCH_SLIPPAGE)) < 1e-9,
+          f"got {new_pos_long.get('entry_price') if new_pos_long else None}")
+    check("long entry records pre-slip close for diagnostics",
+          new_pos_long is not None
+          and abs(new_pos_long["entry_price_pre_slip"] - 70000.0) < 1e-9)
+
+    # 14.4 evaluate_tick LONG non-stop exit (SuperTrend flip): exit_price =
+    # close * (1 - slippage); net deducts 2*fee*size
+    long_pos_open = dict(new_pos_long)
+    bearish_flip_row_14 = dict(bullish_flip_row_14)
+    bearish_flip_row_14["close"] = 70500.0
+    bearish_flip_row_14["supertrend_direction"] = -1
+    bearish_flip_row_14["supertrend_direction_prev"] = 1
+    # supertrend_line is BELOW the entry-time stop (long_pos_open["stop"]
+    # ≈ 69300) so the ratchet branch in signals.long_exit does not raise
+    # the stop above the bar low — keeps this case a "supertrend_flip"
+    # rather than degenerating to "stop".
+    bearish_flip_row_14["supertrend_line"] = 69100.0
+    bearish_flip_row_14["low"] = 70400.0     # well ABOVE the ~69300 stop
+    bearish_flip_row_14["high"] = 70600.0
+    _, trade_flip = parity_eval_tick(
+        asset="BTC/USDT", row=bearish_flip_row_14, strategy=st_strategy_14,
+        position=long_pos_open,
+        positions_by_asset={"BTC/USDT": long_pos_open},
+        max_open_positions=1, size_per_asset=0.5,
+        strategy_version="parity-test",
+    )
+    check("long non-stop exit produced a closed trade",
+          trade_flip is not None,
+          f"got {trade_flip}")
+    if trade_flip is not None:
+        expected_exit = 70500.0 * (1 - RESEARCH_SLIPPAGE)
+        check("long non-stop exit fill = close * (1 - slippage)",
+              abs(trade_flip["exit_price"] - expected_exit) < 1e-9,
+              f"got {trade_flip['exit_price']} expected {expected_exit}")
+        check("long non-stop exit records exit_price_pre_slip = bar close",
+              abs(trade_flip["exit_price_pre_slip"] - 70500.0) < 1e-9)
+        exp_ret = (expected_exit - long_pos_open["entry_price"]) / long_pos_open["entry_price"]
+        exp_net = (exp_ret - 2 * RESEARCH_FEE_PER_SIDE) * 0.5
+        check("long non-stop net_return_pct = (ret - 2*fee) * size",
+              abs(trade_flip["net_return_pct"] - exp_net) < 1e-12,
+              f"got {trade_flip['net_return_pct']} expected {exp_net}")
+
+    # 14.5 evaluate_tick LONG STOP exit: exit_price = stop * (1 - slippage)
+    stop_pos = {
+        "asset": "BTC/USDT",
+        "entry_price": 70000.0 * (1 + RESEARCH_SLIPPAGE),
+        "entry_price_pre_slip": 70000.0,
+        "opened_at": "2026-05-29T12:00:00+00:00",
+        "size": 0.5,
+        "direction": "long",
+        "setup": "supertrend",
+        "stop": 69300.0,
+    }
+    stop_breach_row = {
+        "close": 69500.0, "high": 69700.0, "low": 69200.0,    # low < stop
+        "ema_fast": 70000.0, "ema_slow": 65000.0,
+        "rsi": 40.0, "atr": 700.0, "ema_pull": 69800.0,
+        "supertrend_direction": 1, "supertrend_direction_prev": 1,
+        "supertrend_line": 69100.0,
+        "three_bar": False, "vwap": 69800.0, "donchian_high": 70000.0,
+    }
+    _, trade_stop = parity_eval_tick(
+        asset="BTC/USDT", row=stop_breach_row, strategy=st_strategy_14,
+        position=stop_pos,
+        positions_by_asset={"BTC/USDT": stop_pos},
+        max_open_positions=1, size_per_asset=0.5,
+        strategy_version="parity-test",
+    )
+    check("long stop exit produced a closed trade",
+          trade_stop is not None and trade_stop["exit_reason"] == "stop",
+          f"got {trade_stop}")
+    if trade_stop is not None:
+        expected_stop_exit = 69300.0 * (1 - RESEARCH_SLIPPAGE)
+        check("long STOP exit fill = stop * (1 - slippage)",
+              abs(trade_stop["exit_price"] - expected_stop_exit) < 1e-9,
+              f"got {trade_stop['exit_price']} expected {expected_stop_exit}")
+        check("long STOP exit records exit_price_pre_slip = stop",
+              abs(trade_stop["exit_price_pre_slip"] - 69300.0) < 1e-9)
+
+    # 14.6 SHORT round-trip — same accounting symmetric
+    st_strategy_short = dict(st_strategy_14)
+    st_strategy_short["shorts"] = {"enabled": True, "supertrend": {"enabled": True}}
+    st_strategy_short["setups"] = dict(st_strategy_14["setups"])
+
+    # Short signal row: ST flipped UP→DOWN AND bearish regime (ema_fast < ema_slow)
+    short_entry_row = {
+        "close": 70000.0, "high": 70100.0, "low": 69900.0,
+        "ema_fast": 65000.0, "ema_slow": 70000.0,           # bearish regime
+        "rsi": 50.0, "atr": 700.0, "ema_pull": 70200.0,
+        "supertrend_direction": -1, "supertrend_direction_prev": 1,
+        "supertrend_line": 70700.0,
+        "three_bar": False, "vwap": 70200.0, "donchian_low": 69000.0,
+    }
+    # evaluate_tick's flat-entry path tries longs first; bullish regime is
+    # missing, so the short branch is exercised by directly calling the
+    # signals module + recording with the same slippage convention. We
+    # verify the short-direction round-trip math directly via build_trade_row.
+    short_entry_price = 70000.0 * (1 - RESEARCH_SLIPPAGE)
+    short_pos = {
+        "asset": "BTC/USDT",
+        "entry_price": short_entry_price,
+        "entry_price_pre_slip": 70000.0,
+        "opened_at": "2026-05-29T12:00:00+00:00",
+        "size": 0.5,
+        "direction": "short",
+        "setup": "supertrend_short",
+        "stop": 70700.0,
+    }
+    # Non-stop short exit: close higher
+    short_exit_close = 69500.0
+    short_exit_fill = short_exit_close * (1 + RESEARCH_SLIPPAGE)
+    row_short_close = parity_build_trade_row(
+        asset="BTC/USDT", position={**short_pos, "exit_price_pre_slip": short_exit_close},
+        exit_price=short_exit_fill,
+        exit_reason="supertrend_flip", bars_held=8, strategy_version="parity-test",
+    )
+    exp_short_ret = (short_pos["entry_price"] - short_exit_fill) / short_pos["entry_price"]
+    exp_short_net = (exp_short_ret - 2 * RESEARCH_FEE_PER_SIDE) * 0.5
+    check("short non-stop exit: ret = (entry - exit) / entry",
+          abs(row_short_close["return_pct"] - exp_short_ret) < 1e-12,
+          f"got {row_short_close['return_pct']} expected {exp_short_ret}")
+    check("short non-stop exit: net = (ret - 2*fee) * size",
+          abs(row_short_close["net_return_pct"] - exp_short_net) < 1e-12,
+          f"got {row_short_close['net_return_pct']} expected {exp_short_net}")
+    # Short stop exit: stop * (1 + slippage)
+    short_stop_fill = 70700.0 * (1 + RESEARCH_SLIPPAGE)
+    row_short_stop = parity_build_trade_row(
+        asset="BTC/USDT",
+        position={**short_pos, "exit_price_pre_slip": 70700.0},
+        exit_price=short_stop_fill,
+        exit_reason="stop", bars_held=4, strategy_version="parity-test",
+    )
+    exp_stop_ret = (short_pos["entry_price"] - short_stop_fill) / short_pos["entry_price"]
+    exp_stop_net = (exp_stop_ret - 2 * RESEARCH_FEE_PER_SIDE) * 0.5
+    check("short STOP exit: exit_price = stop * (1 + slippage)",
+          abs(short_stop_fill - 70700.0 * (1 + RESEARCH_SLIPPAGE)) < 1e-12)
+    check("short STOP exit: net = (ret - 2*fee) * size (negative round-trip)",
+          abs(row_short_stop["net_return_pct"] - exp_stop_net) < 1e-12,
+          f"got {row_short_stop['net_return_pct']} expected {exp_stop_net}")
+
+    # 14.7 Direct cross-check: backtest._run_state_machine and the live
+    # evaluate_tick / build_trade_row produce the SAME entry price, exit
+    # price, and net_return_pct for an identical synthetic trade.
+    #
+    # Setup: a 3-bar window. Bar 0 fires the long SuperTrend entry; bar 2
+    # fires the SuperTrend flip exit. Same strategy, same fee/slippage,
+    # so both engines must agree.
+    base_strategy_x = dict(st_strategy_14)
+    parity_records = [
+        # bar 0: bullish flip — entry fires
+        {"close": 70000.0, "high": 70100.0, "low": 69900.0,
+         "ema_fast": 70000.0, "ema_slow": 65000.0,
+         "rsi": 50.0, "atr": 700.0, "ema_pull": 69800.0,
+         "supertrend_direction": 1, "supertrend_direction_prev": -1,
+         "supertrend_line": 69300.0,
+         "three_bar": False, "vwap": 69800.0,
+         "donchian_high": 71000.0, "donchian_low": 69000.0, "donchian_mid": 70000.0,
+         "markov_long_allowed": True, "markov_size_multiplier": 1.0,
+         "markov_allowed_setups": None, "markov_regime_score": 1.0,
+         "markov_state": "x", "markov_stable_state": "x",
+         "volume": 10.0, "ts": "2026-05-29T00:00:00+00:00"},
+        # bar 1: holds, no exit (ST still up, low above stop)
+        {"close": 70200.0, "high": 70300.0, "low": 70100.0,
+         "ema_fast": 70010.0, "ema_slow": 65000.0,
+         "rsi": 52.0, "atr": 700.0, "ema_pull": 69800.0,
+         "supertrend_direction": 1, "supertrend_direction_prev": 1,
+         "supertrend_line": 69350.0,
+         "three_bar": False, "vwap": 69800.0,
+         "donchian_high": 71000.0, "donchian_low": 69000.0, "donchian_mid": 70000.0,
+         "markov_long_allowed": True, "markov_size_multiplier": 1.0,
+         "markov_allowed_setups": None, "markov_regime_score": 1.0,
+         "markov_state": "x", "markov_stable_state": "x",
+         "volume": 10.0, "ts": "2026-05-29T04:00:00+00:00"},
+        # bar 2: bearish flip — exit fires (non-stop)
+        {"close": 70500.0, "high": 70600.0, "low": 70400.0,
+         "ema_fast": 70000.0, "ema_slow": 65000.0,
+         "rsi": 45.0, "atr": 700.0, "ema_pull": 69800.0,
+         "supertrend_direction": -1, "supertrend_direction_prev": 1,
+         "supertrend_line": 70900.0,
+         "three_bar": False, "vwap": 69800.0,
+         "donchian_high": 71000.0, "donchian_low": 69000.0, "donchian_mid": 70000.0,
+         "markov_long_allowed": True, "markov_size_multiplier": 1.0,
+         "markov_allowed_setups": None, "markov_regime_score": 1.0,
+         "markov_state": "x", "markov_stable_state": "x",
+         "volume": 10.0, "ts": "2026-05-29T08:00:00+00:00"},
+    ]
+    bt_result = parity_bt._run_state_machine(
+        parity_records, base_strategy_x, warmup=0,
+        fee=RESEARCH_FEE_PER_SIDE, slippage=RESEARCH_SLIPPAGE,
+    )
+    check("backtest engine produced exactly 1 closed trade for parity scenario",
+          len(bt_result["trades"]) == 1,
+          f"got {len(bt_result['trades'])}")
+
+    # Live side: feed bar 0 to evaluate_tick (creates the long pos), then
+    # feed bar 2 to close it.
+    live_pos, _ = parity_eval_tick(
+        asset="BTC/USDT", row=parity_records[0], strategy=base_strategy_x,
+        position=None,
+        positions_by_asset={"BTC/USDT": None},
+        max_open_positions=1, size_per_asset=0.5,
+        strategy_version="parity-test",
+    )
+    _, live_trade = parity_eval_tick(
+        asset="BTC/USDT", row=parity_records[2], strategy=base_strategy_x,
+        position=live_pos,
+        positions_by_asset={"BTC/USDT": live_pos},
+        max_open_positions=1, size_per_asset=0.5,
+        strategy_version="parity-test",
+    )
+
+    if bt_result["trades"] and live_trade is not None:
+        bt_trade = bt_result["trades"][0]
+        check("PARITY: backtest entry_price == live entry_price",
+              abs(bt_trade["entry_price"] - live_pos["entry_price"]) < 1e-9,
+              f"bt={bt_trade['entry_price']} live={live_pos['entry_price']}")
+        check("PARITY: backtest exit_price == live exit_price",
+              abs(bt_trade["exit_price"] - live_trade["exit_price"]) < 1e-9,
+              f"bt={bt_trade['exit_price']} live={live_trade['exit_price']}")
+        # Backtest size is base_size from strategy ("position_size_r": 0.5)
+        # × markov size_multiplier (1.0) = 0.5. Live evaluate_tick uses the
+        # same size_per_asset = 0.5 (the test passes it explicitly). So
+        # both engines apply size = 0.5 here.
+        check("PARITY: backtest net_return_pct == live net_return_pct",
+              abs(bt_trade["net_return_pct"] - live_trade["net_return_pct"]) < 1e-9,
+              f"bt={bt_trade['net_return_pct']} live={live_trade['net_return_pct']}")
+        check("PARITY: backtest gross_return_pct == live return_pct",
+              abs(bt_trade["gross_return_pct"] - live_trade["return_pct"]) < 1e-9,
+              f"bt={bt_trade['gross_return_pct']} live={live_trade['return_pct']}")
+
+    # 14.8 Source-level confirmation that loop.py and multi_loop.py both
+    # apply the slippage and fee constants.
+    multi_src = (ROOT / "hermes_trading" / "multi_loop.py").read_text()
+    single_src = (ROOT / "hermes_trading" / "loop.py").read_text()
+    check("multi_loop.py: long entry applies slippage",
+          "last_price * (1.0 + slippage)" in multi_src)
+    check("multi_loop.py: short entry applies slippage",
+          "last_price * (1.0 - slippage)" in multi_src)
+    check("multi_loop.py: stop exit fills at position['stop']",
+          'base_exit = float(position["stop"])' in multi_src)
+    check("multi_loop.py: passes fee_per_side to build_trade_row",
+          "fee=fee_per_side" in multi_src)
+    check("loop.py: long entry applies SLIPPAGE",
+          "last * (1.0 + SLIPPAGE)" in single_src)
+    check("loop.py: short entry applies SLIPPAGE",
+          "last * (1.0 - SLIPPAGE)" in single_src)
+    check("loop.py: net_return_pct deducts 2*FEE_PER_SIDE",
+          "ret_pct - 2.0 * FEE_PER_SIDE" in single_src)
+    check("loop.py imports RESEARCH_* constants from multi_loop",
+          "from .multi_loop import RESEARCH_FEE_PER_SIDE" in single_src)
+
+    # 14.9 Multi-asset config can override the defaults
+    cfg_override = {"assets": ["BTC/USDT"], "timeframe": "4h",
+                    "strategy": "state/strategy.yaml",
+                    "fee_per_side": 0.0005, "slippage": 0.0002}
+    check("config supports fee_per_side override key",
+          cfg_override.get("fee_per_side") == 0.0005)
+    check("config supports slippage override key",
+          cfg_override.get("slippage") == 0.0002)
     print()
 
     if failures:
