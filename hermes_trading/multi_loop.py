@@ -443,15 +443,24 @@ async def run(
 
             df = _ohlcv_to_df(ohlcv)
             ind_df = signals.compute_indicators(df, strategy)
-            row = ind_df.iloc[-1].to_dict()
+            # Issue #24: split into display_row (current in-progress bar — for
+            # tick line / heartbeat / intra-bar stop monitoring) and signal_row
+            # (most recent CLOSED bar — for entry and SuperTrend flip / time
+            # exit decisions). This makes live behaviour match backtest
+            # bar-close semantics. signals.py is unchanged.
+            display_row, signal_row = display_mod.split_display_and_signal_rows(ind_df)
+            row = display_row  # legacy alias used below for heartbeat / display
             last_price = float(row["close"])
             rsi_val = float(row["rsi"]) if pd.notna(row.get("rsi")) else None
 
             position = positions_state[asset]
             # ---- per-bar funding state lookup (Issue #21) ----
+            # Funding is keyed by the bar timestamp; use the SIGNAL bar so
+            # the gate sees the same funding value the research backtest
+            # would have seen for an entry on this signal.
             funding_state = None
             if funding_overlay is not None:
-                funding_state = funding_overlay.state_at(asset, row.get("ts"))
+                funding_state = funding_overlay.state_at(asset, signal_row.get("ts"))
 
             funding_block_message: str | None = None
 
@@ -459,8 +468,8 @@ async def run(
                 allowed, gate_reason = can_enter(asset, positions_state, max_open)
                 opened = False
                 if allowed:
-                    # try long first
-                    setup_l = signals.long_entry(row, strategy)
+                    # try long first — evaluated on signal_row (Issue #24)
+                    setup_l = signals.long_entry(signal_row, strategy)
                     if setup_l:
                         if funding_overlay is not None:
                             gate = evaluate_funding_gate(
@@ -492,7 +501,7 @@ async def run(
                                 "size": size_per_asset,
                                 "direction": "long",
                                 "setup": setup_l,
-                                "stop": float(signals.initial_stop(row, setup_l, strategy)),
+                                "stop": float(signals.initial_stop(signal_row, setup_l, strategy)),
                                 "strategy_version": version,
                                 "entry_rsi": rsi_val,
                                 "funding_rate_at_entry": (
@@ -506,7 +515,8 @@ async def run(
                                 f"({setup_l}, stop={new_pos['stop']:.2f}, size={size_per_asset})")
 
                     if not opened and positions_state[asset] is None:
-                        setup_s = signals.short_entry(row, strategy)
+                        # short side also evaluated on signal_row (Issue #24)
+                        setup_s = signals.short_entry(signal_row, strategy)
                         if setup_s:
                             short_ok = True
                             if funding_overlay is not None:
@@ -536,7 +546,7 @@ async def run(
                                     "size": size_per_asset,
                                     "direction": "short",
                                     "setup": setup_s,
-                                    "stop": float(signals.initial_stop_short(row, setup_s, strategy)),
+                                    "stop": float(signals.initial_stop_short(signal_row, setup_s, strategy)),
                                     "strategy_version": version,
                                     "entry_rsi": rsi_val,
                                     "funding_rate_at_entry": (
@@ -553,10 +563,28 @@ async def run(
                                  pd.Timestamp(position["opened_at"])).total_seconds()
                                 / sec_per_bar)
                 direction = position.get("direction", "long")
+                # Issue #24: SuperTrend flip / regime-flip / time / trail
+                # exits use the CLOSED signal_row. signals.long_exit also
+                # ratchets position["stop"] from the closed bar's
+                # supertrend_line — that's the correct, stable value.
                 if direction == "long":
-                    reason = signals.long_exit(row, position, strategy, bars_held)
+                    reason = signals.long_exit(signal_row, position, strategy, bars_held)
                 else:
-                    reason = signals.short_exit(row, position, strategy, bars_held)
+                    reason = signals.short_exit(signal_row, position, strategy, bars_held)
+                # Intra-bar stop reactivity: if the running display_row low/
+                # high pierces the (possibly just-ratcheted) stop, exit
+                # immediately. signals.long_exit already checks the closed
+                # bar's low; this catches the new low/high inside the
+                # current in-progress bar so paper stops stay responsive.
+                if reason is None:
+                    if direction == "long":
+                        dlow = display_row.get("low")
+                        if dlow is not None and not pd.isna(dlow) and float(dlow) <= position["stop"]:
+                            reason = "stop"
+                    else:
+                        dhigh = display_row.get("high")
+                        if dhigh is not None and not pd.isna(dhigh) and float(dhigh) >= position["stop"]:
+                            reason = "stop"
                 if reason:
                     trade = build_trade_row(asset, position, last_price,
                                             reason, bars_held, version)
@@ -648,7 +676,8 @@ async def run(
                 "ema_fast": ef,
                 "ema_slow": es,
                 "position": cur_pos,
-                "raw_row": row,
+                "raw_row": row,           # display_row — live indicator state
+                "signal_row": signal_row, # Issue #24 — closed bar driving decisions
                 "funding_state": funding_state,
                 "funding_blocked_message": funding_block_message,
             }
@@ -696,8 +725,10 @@ async def run(
                     verbose=verbose,
                 ))
                 if verbose:
+                    # Issue #24: diagnostic reflects the SIGNAL bar — that's
+                    # the bar entry decisions are evaluated on.
                     diag = display_mod.diagnose_entry_blockers(
-                        row=disp["raw_row"],
+                        row=disp.get("signal_row") or disp["raw_row"],
                         strategy=strategy,
                         position=disp["position"],
                         portfolio_open=open_count,
@@ -705,6 +736,12 @@ async def run(
                     )
                     for line in display_mod.format_entry_diagnostic_lines(diag):
                         log(line)
+                    # Surface the two bar timestamps so it's obvious which
+                    # bar each piece is reading.
+                    sb_ts = (disp.get("signal_row") or {}).get("ts")
+                    db_ts = disp["raw_row"].get("ts")
+                    if sb_ts is not None and db_ts is not None:
+                        log(f"  signal_bar={sb_ts}  display_bar={db_ts}")
                     # Issue #21 — funding overlay verbose line
                     if funding_overlay is not None:
                         fs = disp.get("funding_state")

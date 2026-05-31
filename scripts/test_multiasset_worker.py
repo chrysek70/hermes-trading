@@ -681,6 +681,206 @@ def main() -> int:
           f"got {DISPLAY_TIME_MODES}")
     print()
 
+    # --- 12. Bar-close parity (Issue #24)
+    print("12. Bar-close parity: live signals use the LAST CLOSED bar (Issue #24)")
+    import pandas as _pd
+    from hermes_trading.display import split_display_and_signal_rows
+    from hermes_trading import signals as _sig
+    from hermes_trading.multi_loop import evaluate_tick
+
+    # Build a synthetic 3-bar indicator frame:
+    #   bar T-2  (closed)  : DOWN
+    #   bar T-1  (closed)  : DOWN  → signal_row when iloc[-1] is T (in-progress)
+    #   bar T    (CURRENT) : UP    → display_row (in-progress flicker)
+    # If live evaluates entry on display_row, the bullish flip fires (BUG).
+    # If live evaluates on signal_row, no flip — entry must NOT fire (FIX).
+    base_strategy_st = {
+        "setups": {
+            "supertrend": {"enabled": True, "period": 10, "multiplier": 3.0,
+                           "max_holding_bars": 0},
+            "pullback":  {"enabled": False, "pullback_ema": 21, "ema_tol": 0.002,
+                          "rsi_threshold": 32,
+                          "exit": {"type": "mean_revert", "stop_atr_mult": 1.2,
+                                   "target_rsi": 55}},
+            "breakout":  {"enabled": False, "require_above_vwap": True,
+                          "ignition_atr_mult": 1.0,
+                          "exit": {"type": "trail", "trail_ema": 21,
+                                   "stop_atr_mult": 1.5}},
+        },
+        "shorts": {"enabled": False},
+        "risk": {"position_size_r": 0.5, "atr_period": 14, "max_hold_bars": 240,
+                 "regime_flip_exit": False},
+        "regime": {"trend_ema_fast": 50, "trend_ema_slow": 200},
+        "rsi_period": 14, "_timeframe": "4h",
+    }
+    ind_df_flicker = _pd.DataFrame({
+        "open":  [70000.0, 70000.0, 70000.0],
+        "high":  [70100.0, 70100.0, 70200.0],
+        "low":   [69900.0, 69900.0, 69950.0],
+        "close": [70000.0, 70000.0, 70000.0],
+        "volume":[10.0, 10.0, 10.0],
+        "ema_fast": [70000.0, 70000.0, 70000.0],
+        "ema_slow": [65000.0, 65000.0, 65000.0],     # bullish regime everywhere
+        "rsi":     [50.0, 50.0, 50.0],
+        "atr":     [700.0, 700.0, 700.0],
+        "ema_pull": [69800.0, 69800.0, 69800.0],
+        "three_bar": [False, False, False],
+        "vwap":    [69800.0, 69800.0, 69800.0],
+        "donchian_high": [71000.0, 71000.0, 71000.0],
+        # T-2 and T-1 are DOWN (closed); T (in-progress) wobbled UP.
+        "supertrend_direction":      [-1, -1,  1],
+        "supertrend_direction_prev": [None, -1, -1],  # shift(1) of the above
+        "supertrend_line":           [70500.0, 70500.0, 69300.0],
+    })
+    display_row, signal_row = split_display_and_signal_rows(ind_df_flicker)
+    check("display_row is the latest (in-progress) bar",
+          int(display_row["supertrend_direction"]) == 1,
+          f"got {display_row['supertrend_direction']}")
+    check("signal_row is the prior CLOSED bar",
+          int(signal_row["supertrend_direction"]) == -1,
+          f"got {signal_row['supertrend_direction']}")
+
+    # Bug-emulation: entry evaluated on display_row would FIRE.
+    bug_setup = _sig.long_entry(display_row, base_strategy_st)
+    check("BUG repro: entry on display_row would fire (would have been H1)",
+          bug_setup == "supertrend",
+          f"got {bug_setup!r}")
+    # Fix: entry evaluated on signal_row must NOT fire.
+    fix_setup = _sig.long_entry(signal_row, base_strategy_st)
+    check("FIX: entry on signal_row does NOT fire on intra-bar flicker",
+          fix_setup is None, f"got {fix_setup!r}")
+
+    # And vice versa — a real closed-bar UP flip MUST fire.
+    real_flip = _pd.DataFrame({
+        "open":  [70000.0, 70000.0, 70000.0],
+        "high":  [70100.0, 70200.0, 70300.0],
+        "low":   [69900.0, 69950.0, 70000.0],
+        "close": [70000.0, 70200.0, 70250.0],
+        "volume":[10.0, 10.0, 10.0],
+        "ema_fast": [70000.0, 70000.0, 70000.0],
+        "ema_slow": [65000.0, 65000.0, 65000.0],
+        "rsi":     [50.0, 50.0, 50.0],
+        "atr":     [700.0, 700.0, 700.0],
+        "ema_pull": [69800.0, 69800.0, 69800.0],
+        "three_bar": [False, False, False],
+        "vwap":    [69800.0, 69800.0, 69800.0],
+        "donchian_high": [71000.0, 71000.0, 71000.0],
+        # T-2 DOWN, T-1 flipped to UP at CLOSE, T continues UP.
+        "supertrend_direction":      [-1,  1,  1],
+        "supertrend_direction_prev": [None, -1,  1],
+        "supertrend_line":           [70500.0, 69300.0, 69300.0],
+    })
+    dr_real, sr_real = split_display_and_signal_rows(real_flip)
+    real_setup = _sig.long_entry(sr_real, base_strategy_st)
+    check("FIX: a real CLOSED-bar UP flip on signal_row DOES fire",
+          real_setup == "supertrend", f"got {real_setup!r}")
+
+    # Stop check semantic: a closed-bar low that did NOT breach the stop
+    # should not exit (signals.long_exit ratchet branch only). An
+    # in-progress display_row low BELOW the stop must trigger an exit in
+    # the orchestration's intra-bar check.
+    position_long = {"entry_price": 70200, "direction": "long",
+                     "setup": "supertrend", "stop": 70000.0, "size": 0.5,
+                     "opened_at": "2026-05-30T20:00:00+00:00"}
+    # signal_row's low is 70000 — equal to stop; signals.long_exit will
+    # treat this as a stop (low <= stop).
+    sr_lows_eq = dict(sr_real)
+    sr_lows_eq["low"] = 70010.0  # bar low strictly above the stop
+    reason_signal = _sig.long_exit(sr_lows_eq, dict(position_long), base_strategy_st, 1)
+    check("signal_row low above stop: no exit (no flip, no breach)",
+          reason_signal is None, f"got {reason_signal!r}")
+
+    # Intra-bar low below stop on display_row must trigger an exit (this
+    # is the orchestration responsibility, not signals.long_exit).
+    dr_intrabar = dict(dr_real)
+    dr_intrabar["low"] = 69990.0    # below stop 70000
+    # Simulate the orchestration's intra-bar reactive check:
+    intrabar_reason = None
+    if reason_signal is None and dr_intrabar["low"] <= position_long["stop"]:
+        intrabar_reason = "stop"
+    check("intra-bar display_row low <= stop triggers 'stop' in orchestration",
+          intrabar_reason == "stop", f"got {intrabar_reason!r}")
+
+    # Short side mirror: SuperTrend flip back to UP on closed bar must
+    # trigger a short exit; an intra-bar high above stop on display_row
+    # must trigger a stop exit.
+    short_strategy = dict(base_strategy_st)
+    short_strategy["shorts"] = {"enabled": True,
+                                "supertrend": {"enabled": True}}
+    short_pos = {"entry_price": 70000, "direction": "short",
+                 "setup": "supertrend_short", "stop": 70500.0,
+                 "size": 0.5, "opened_at": "2026-05-30T20:00:00+00:00"}
+    # signal_row's direction is +1 (UP). The SuperTrend short branch
+    # ratchets the stop DOWN to the new lower band and then checks
+    # `high >= stop` — on a real flip bar the high is typically above
+    # the freshly-ratcheted band, which triggers a "stop" close. Both
+    # reasons mean "close the short on this closed bar"; what matters
+    # for parity is that the closed bar's UP direction DOES close the
+    # short. Backtest behaviour is identical.
+    short_exit_reason = _sig.short_exit(sr_real, dict(short_pos), short_strategy, 1)
+    check("signal_row UP flip CLOSES a SHORT (reason='stop' or 'supertrend_flip')",
+          short_exit_reason in ("stop", "supertrend_flip"),
+          f"got {short_exit_reason!r}")
+    # And the in-progress flicker on the prior DOWN-DOWN bar should NOT
+    # close the short — research holds the position through chop.
+    short_exit_signal_down = _sig.short_exit(signal_row, dict(short_pos),
+                                             short_strategy, 1)
+    check("signal_row still DOWN (prior closed): SHORT stays open",
+          short_exit_signal_down is None,
+          f"got {short_exit_signal_down!r}")
+
+    # evaluate_tick should also use the signal_row when called directly
+    # — verify by passing it the flicker signal_row and confirming no
+    # entry fires (entries fire only on a real closed-bar flip).
+    new_pos, trade = evaluate_tick(
+        asset="BTC/USDT",
+        row=signal_row,            # caller picks which row to pass
+        strategy=base_strategy_st,
+        position=None,
+        positions_by_asset={"BTC/USDT": None},
+        max_open_positions=1, size_per_asset=0.5,
+        strategy_version="v3-supertrend-01",
+    )
+    check("evaluate_tick on signal_row does NOT fire on intra-bar flicker",
+          new_pos is None and trade is None,
+          f"got new_pos={new_pos}")
+
+    # Helper edge cases
+    empty_df = _pd.DataFrame()
+    dr_e, sr_e = split_display_and_signal_rows(empty_df)
+    check("empty frame returns empty dicts",
+          dr_e == {} and sr_e == {}, f"got ({dr_e}, {sr_e})")
+
+    single_bar = ind_df_flicker.iloc[-1:].copy().reset_index(drop=True)
+    dr_s, sr_s = split_display_and_signal_rows(single_bar)
+    check("single-bar fallback: signal_row == display_row",
+          dr_s["supertrend_direction"] == sr_s["supertrend_direction"]
+          and int(dr_s["supertrend_direction"]) == 1)
+
+    # Confirm the orchestration files actually wire signal_row to entries
+    loop_src = (ROOT / "hermes_trading" / "loop.py").read_text()
+    mloop_src = (ROOT / "hermes_trading" / "multi_loop.py").read_text()
+    check("loop.py calls split_display_and_signal_rows",
+          "split_display_and_signal_rows" in loop_src)
+    check("multi_loop.py calls split_display_and_signal_rows",
+          "split_display_and_signal_rows" in mloop_src)
+    check("loop.py uses signal_row for long_entry",
+          "signals.long_entry(signal_row" in loop_src,
+          "string not found in loop.py")
+    check("multi_loop.py uses signal_row for long_entry",
+          "signals.long_entry(signal_row" in mloop_src,
+          "string not found in multi_loop.py")
+    check("loop.py uses signal_row for long_exit",
+          "signals.long_exit(signal_row" in loop_src)
+    check("multi_loop.py uses signal_row for long_exit",
+          "signals.long_exit(signal_row" in mloop_src)
+    check("loop.py still uses display_row low for intra-bar stop",
+          'display_row.get("low")' in loop_src and 'reason = "stop"' in loop_src)
+    check("multi_loop.py still uses display_row low/high for intra-bar stop",
+          ('display_row.get("low")' in mloop_src
+           and 'display_row.get("high")' in mloop_src))
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:

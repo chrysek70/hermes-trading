@@ -433,6 +433,67 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Live signal parity fix (Issue #24) — shipped
+
+Audit on Issue #23 identified one material live-vs-backtest drift:
+the live worker evaluated entry and SuperTrend flip-exit signals on
+the current in-progress 4h candle (`ind_df.iloc[-1]`), while every
+backtest evaluated on closed bars only. This created a systematic
+bias toward earlier entries and earlier flip-exits than research
+measured.
+
+The fix splits each tick into two rows:
+
+- `display_row` = current in-progress bar (`iloc[-1]`) — used for the
+  tick line, the heartbeat live-price field, and intra-bar stop
+  monitoring so paper stops stay responsive within the running bar.
+- `signal_row` = most recently closed bar (`iloc[-2]`) — used for
+  entry decisions and SuperTrend flip / regime / time / trail exits
+  so live matches backtest bar-close semantics.
+
+The split lives in a 3-line helper
+(`hermes_trading.display.split_display_and_signal_rows`) and is
+consumed by the two orchestration files (`loop.py` for single-asset,
+`multi_loop.py` for multi-asset). **`signals.py` is unchanged.** Pure
+orchestration adaptation per the audit recommendation.
+
+Stop semantics preserved:
+
+- `signals.long_exit` / `short_exit` still check `signal_row`'s
+  low / high against the (just-ratcheted) stop — catches any closed
+  bar that breached but was somehow missed (e.g. worker restart).
+- Orchestration additionally checks `display_row`'s running low/high
+  intra-bar — gives the worker the same reactivity it had before
+  the fix.
+
+Funding overlay timing also updated: the per-asset funding lookup
+now keys off `signal_row.ts` so the gate sees the same funding value
+the research backtest saw for an entry decision on that bar.
+
+Self-test extended from 115 to 137 unique invariants (22 new) — the
+new section directly proves the fix:
+
+- intra-bar SuperTrend UP flicker on `display_row` does NOT trigger
+  entry (would-have-been H1)
+- closed-bar SuperTrend UP flip on `signal_row` DOES trigger entry
+- closed-bar low above stop: no exit (no false breach)
+- in-progress `display_row` low <= stop: exit "stop" (intra-bar
+  reactivity preserved)
+- closed-bar UP flip on a SHORT closes the position (with reason
+  "stop" or "supertrend_flip" depending on whether the freshly-
+  ratcheted line was breached — both are correct closes)
+- single-bar warmup fallback: `signal_row` == `display_row` (no crash)
+
+Decay monitor still passes 14/14. Trade-row schema unchanged.
+Strategy logic unchanged (`signals.py` byte-for-byte the same).
+
+After this fix, the live worker (in either config — long-only
+fallback OR adopted long-short + funding) executes exactly as the
+corresponding research backtest measured: entries and SuperTrend
+flip exits at bar close, stops responsive intra-bar. Without it
+every future research result would have been compared against
+slightly-different live behaviour.
+
 ## Live wiring of long-short + funding filter (Issue #21) — shipped
 
 The Issue #20 adopted research candidate (`btc_eth_long_short_funding_filter`,

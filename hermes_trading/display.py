@@ -24,6 +24,38 @@ from typing import Any
 import pandas as pd
 
 
+# ---------- bar-completeness helper (Issue #24) -----------------------------
+
+def split_display_and_signal_rows(ind_df) -> tuple[dict, dict]:
+    """Return ``(display_row, signal_row)`` from an indicator DataFrame.
+
+    ``display_row`` is the **current in-progress** bar (``iloc[-1]``).
+    It is used for the tick line, the heartbeat live-price field, and
+    intra-bar stop monitoring so paper stops stay reactive.
+
+    ``signal_row`` is the **most recently closed** bar (``iloc[-2]``).
+    It is used for entry decisions and SuperTrend flip / time-stop
+    exits so live behaviour matches what every backtest measured.
+
+    If only one bar is present (e.g. the very first poll on startup),
+    both rows fall back to ``iloc[-1]`` — there is no closed bar yet
+    to use.
+
+    This split is the entire fix for Issues #23 / #24 — every other
+    audit finding flowed from feeding the in-progress bar into signal
+    evaluation. ``signals.py`` is unchanged.
+    """
+    if len(ind_df) == 0:
+        empty: dict = {}
+        return empty, empty
+    display_row = ind_df.iloc[-1].to_dict()
+    if len(ind_df) >= 2:
+        signal_row = ind_df.iloc[-2].to_dict()
+    else:
+        signal_row = display_row
+    return display_row, signal_row
+
+
 # ---------- mode detection --------------------------------------------------
 
 def is_supertrend_active(strategy: dict) -> bool:

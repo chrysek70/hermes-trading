@@ -250,7 +250,13 @@ async def run(asset: str, verbose: bool = False) -> None:
                 raise RuntimeError(f"insufficient OHLCV ({len(ohlcv)} bars)")
             df = _ohlcv_to_df(ohlcv)
             ind_df = signals.compute_indicators(df, strategy)
-            row = ind_df.iloc[-1].to_dict()
+            # Issue #24: split into display_row (current in-progress bar — for
+            # tick line / heartbeat / intra-bar stop monitoring) and signal_row
+            # (most recent CLOSED bar — for entry and SuperTrend flip / time
+            # exit decisions). This makes live behaviour match backtest
+            # bar-close semantics. signals.py is unchanged.
+            display_row, signal_row = display_mod.split_display_and_signal_rows(ind_df)
+            row = display_row  # legacy alias used below for heartbeat / display
             last = float(row["close"])
             rsi_val = float(row["rsi"]) if pd.notna(row.get("rsi")) else None
             consecutive_failures = 0
@@ -258,8 +264,9 @@ async def run(asset: str, verbose: bool = False) -> None:
             if position is None:
                 fired_dir = None
                 # Long entry — Markov gate (when on) applies to longs only.
+                # Issue #24: evaluated on signal_row (last closed bar).
                 if regime_allowed_long:
-                    setup_l = signals.long_entry(row, strategy)
+                    setup_l = signals.long_entry(signal_row, strategy)
                     if setup_l:
                         position = {
                             "entry_price": last,
@@ -267,13 +274,13 @@ async def run(asset: str, verbose: bool = False) -> None:
                             "size": float(strategy["risk"].get("position_size_r", 0.5)),
                             "direction": "long",
                             "setup": setup_l,
-                            "stop": signals.initial_stop(row, setup_l, strategy),
+                            "stop": signals.initial_stop(signal_row, setup_l, strategy),
                             "entry_rsi": rsi_val,
                             "entry_regime": regime_str,
                         }
                         fired_dir = "long"
                 if fired_dir is None:
-                    setup_s = signals.short_entry(row, strategy)
+                    setup_s = signals.short_entry(signal_row, strategy)
                     if setup_s:
                         position = {
                             "entry_price": last,
@@ -281,7 +288,7 @@ async def run(asset: str, verbose: bool = False) -> None:
                             "size": float(strategy["risk"].get("position_size_r", 0.5)),
                             "direction": "short",
                             "setup": setup_s,
-                            "stop": signals.initial_stop_short(row, setup_s, strategy),
+                            "stop": signals.initial_stop_short(signal_row, setup_s, strategy),
                             "entry_rsi": rsi_val,
                             "entry_regime": regime_str,
                         }
@@ -297,10 +304,28 @@ async def run(asset: str, verbose: bool = False) -> None:
             else:
                 direction = position.get("direction", "long")
                 bars_held = _bars_held(position, timeframe)
+                # Issue #24: SuperTrend flip / regime-flip / time / target /
+                # trail exits use the CLOSED signal_row. signals.long_exit
+                # also ratchets position["stop"] from the closed bar's
+                # supertrend_line — that's the correct, stable value.
                 if direction == "long":
-                    reason = signals.long_exit(row, position, strategy, bars_held)
+                    reason = signals.long_exit(signal_row, position, strategy, bars_held)
                 else:
-                    reason = signals.short_exit(row, position, strategy, bars_held)
+                    reason = signals.short_exit(signal_row, position, strategy, bars_held)
+                # Intra-bar stop reactivity: if the running display_row low/high
+                # pierces the (possibly just-ratcheted) stop, exit now without
+                # waiting for bar close. signals.long_exit already checks the
+                # closed bar's low; this catches the new low/high on the
+                # in-progress bar.
+                if reason is None:
+                    if direction == "long":
+                        dlow = display_row.get("low")
+                        if dlow is not None and not pd.isna(dlow) and float(dlow) <= position["stop"]:
+                            reason = "stop"
+                    else:
+                        dhigh = display_row.get("high")
+                        if dhigh is not None and not pd.isna(dhigh) and float(dhigh) >= position["stop"]:
+                            reason = "stop"
                 if reason:
                     if direction == "long":
                         ret_pct = (last - position["entry_price"]) / position["entry_price"]
@@ -387,9 +412,11 @@ async def run(asset: str, verbose: bool = False) -> None:
                 ))
                 # Issue #18: verbose "why no trade" diagnostic. Only
                 # emitted in verbose mode; never in default output.
+                # Issue #24: blocker analysis uses signal_row — that is
+                # the bar the entry decision is actually evaluated on.
                 if verbose:
                     diag = display_mod.diagnose_entry_blockers(
-                        row=row,
+                        row=signal_row,
                         strategy=strategy,
                         position=position,
                         portfolio_open=1 if position is not None else 0,
@@ -397,6 +424,12 @@ async def run(asset: str, verbose: bool = False) -> None:
                     )
                     for line in display_mod.format_entry_diagnostic_lines(diag):
                         log(line)
+                    # Issue #24: surface the two bar timestamps so it is
+                    # obvious which bar a signal is being judged on.
+                    sb_ts = signal_row.get("ts")
+                    db_ts = display_row.get("ts")
+                    if sb_ts is not None and db_ts is not None:
+                        log(f"  signal_bar={sb_ts}  display_bar={db_ts}")
             else:
                 # legacy v2 RSI display preserved verbatim — including
                 # color tags and the regime suffix.

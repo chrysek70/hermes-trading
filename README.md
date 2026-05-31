@@ -125,6 +125,18 @@ flag — `state/heartbeat.json`, `state/trades.jsonl`, `state/positions/`,
 research reports, decay-monitor output, every backtest result. The
 display setting is presentation only.
 
+#### Live signal parity (Issue #24)
+
+The live worker evaluates entries and SuperTrend flip / time / regime
+exits on the **most recently closed candle** so live behaviour matches
+what every backtest measured. The current in-progress candle is still
+used for the tick display, the heartbeat live-price field, and
+intra-bar stop monitoring so paper stops remain responsive within the
+running bar. `signals.py` is unchanged; the split is in the worker
+orchestration only (`hermes_trading/multi_loop.py` and
+`hermes_trading/loop.py`, via the small
+`hermes_trading.display.split_display_and_signal_rows` helper).
+
 Reads `state/live_multiasset.yaml` (assets list, timeframe,
 `max_open_positions`, shared strategy yaml). Maintains one position
 per asset in `state/positions/<KEY>.json`, writes a portfolio-level

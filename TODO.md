@@ -5,6 +5,12 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Live signal parity fix (Issue #24) — entries and SuperTrend flip
+  exits now evaluate on the most recent CLOSED candle. Display and
+  intra-bar stop monitoring keep using the current in-progress
+  candle for reactivity. `signals.py` byte-for-byte unchanged.
+  137/137 self-test invariants pass; decay monitor unaffected. The
+  H1/H2 drift identified by the Issue #23 audit is closed.
 - ✓ Live wiring of long-short + funding filter (Issue #21) — opt-in
   via `state/live_multiasset_long_short_funding.yaml`. Long-only
   fallback config untouched. Direction-aware funding gate (block long
