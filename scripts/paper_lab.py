@@ -541,6 +541,28 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+EVENT_TOKENS = (
+    "ENTER",            # log() emits "ENTER long ..." / "ENTER short ..."
+    "EXIT",             # log() emits "EXIT long ..." / "EXIT short ..."
+    "BLOCK long",       # funding / volume_confirmation BLOCK lines
+    "BLOCK short",
+    "circuit",          # circuit-break trip
+    "Error",            # python tracebacks tend to start with these
+    "ERROR",
+    "Traceback",
+)
+
+
+def _is_event_line(line: str) -> bool:
+    """True for actionable lines: entries, exits, blocks, circuit breaks, errors.
+
+    The diagnostic tick + funding/vol/volume verbose printouts are
+    deliberately excluded — they fire every 15s on every poll and
+    drown out the events the operator actually wants to see.
+    """
+    return any(tok in line for tok in EVENT_TOKENS)
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     if args.variant == "all":
         # Multi-tail: stream all variants concurrently, prefixing each
@@ -549,7 +571,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
         if not args.follow:
             print("--variant all only makes sense with --follow", file=sys.stderr)
             return 2
-        return _cmd_logs_follow_all(args.lines)
+        return _cmd_logs_follow_all(args.lines, args.events)
 
     if args.variant not in VARIANTS:
         print(f"unknown variant: {args.variant}", file=sys.stderr)
@@ -563,15 +585,26 @@ def cmd_logs(args: argparse.Namespace) -> int:
     n = args.lines
 
     if args.follow:
-        return _cmd_logs_follow_one(args.variant, p, n)
+        return _cmd_logs_follow_one(args.variant, p, n, args.events)
 
     lines = p.read_text(errors="replace").splitlines()
-    for line in lines[-n:]:
-        print(line)
+    if args.events:
+        events = [line for line in lines if _is_event_line(line)]
+        if not events:
+            print(f"# no actionable events in {p.relative_to(ROOT)}")
+            print(f"# (worker is polling; SuperTrend has not flipped, "
+                  f"no gate has fired)")
+            return 0
+        for line in events[-n:]:
+            print(line)
+    else:
+        for line in lines[-n:]:
+            print(line)
     return 0
 
 
-def _cmd_logs_follow_one(variant: str, p: Path, tail_lines: int) -> int:
+def _cmd_logs_follow_one(variant: str, p: Path, tail_lines: int,
+                          events_only: bool = False) -> int:
     """`tail -f` one variant's log. Ctrl-C to exit."""
     # Switch stdout to line-buffered so streaming works under any
     # redirection (pipe, file, tee). Without this, follow mode looks
@@ -580,11 +613,18 @@ def _cmd_logs_follow_one(variant: str, p: Path, tail_lines: int) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     except AttributeError:
         pass
-    print(f"# follow {variant}  log={p.relative_to(ROOT)}  (Ctrl-C to exit)",
+    mode_label = "events-only" if events_only else "all lines"
+    print(f"# follow {variant}  log={p.relative_to(ROOT)}  "
+          f"({mode_label}, Ctrl-C to exit)",
           flush=True)
     # Print the last `tail_lines` lines first, then stream new content.
     with p.open("r", errors="replace") as f:
         existing = f.read().splitlines()
+        if events_only:
+            existing = [ln for ln in existing if _is_event_line(ln)]
+            if not existing:
+                print("# (no events yet — waiting for ENTER / EXIT / "
+                      "BLOCK / circuit / error)", flush=True)
         for line in existing[-tail_lines:]:
             print(line, flush=True)
         # Seek to end and follow.
@@ -600,6 +640,8 @@ def _cmd_logs_follow_one(variant: str, p: Path, tail_lines: int) -> int:
                         pass
                     time.sleep(0.5)
                     continue
+                if events_only and not _is_event_line(line):
+                    continue
                 sys.stdout.write(line)
                 sys.stdout.flush()
         except KeyboardInterrupt:
@@ -608,7 +650,7 @@ def _cmd_logs_follow_one(variant: str, p: Path, tail_lines: int) -> int:
             return 0
 
 
-def _cmd_logs_follow_all(tail_lines: int) -> int:
+def _cmd_logs_follow_all(tail_lines: int, events_only: bool = False) -> int:
     """Stream all variants concurrently, one prefixed line per write.
 
     Uses one filehandle per variant + a simple round-robin readline
@@ -620,7 +662,9 @@ def _cmd_logs_follow_all(tail_lines: int) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     except AttributeError:
         pass
-    print("# follow ALL variants  (Ctrl-C to exit)", flush=True)
+    mode_label = "events-only" if events_only else "all lines"
+    print(f"# follow ALL variants  ({mode_label}, Ctrl-C to exit)",
+          flush=True)
     handles: dict[str, "any"] = {}
     for name in VARIANTS:
         p = _log_file(name)
@@ -630,10 +674,19 @@ def _cmd_logs_follow_all(tail_lines: int) -> int:
             continue
         f = p.open("r", errors="replace")
         existing = f.read().splitlines()
+        if events_only:
+            existing = [ln for ln in existing if _is_event_line(ln)]
         for line in existing[-tail_lines:]:
             print(f"[{name}] {line}", flush=True)
         f.seek(0, 2)
         handles[name] = f
+    if events_only and not any(
+            _log_file(n).exists()
+            and any(_is_event_line(ln)
+                    for ln in _log_file(n).read_text(errors='replace').splitlines())
+            for n in VARIANTS):
+        print("# (no events yet across any variant — waiting for ENTER / "
+              "EXIT / BLOCK / circuit / error)", flush=True)
 
     try:
         while True:
@@ -653,6 +706,8 @@ def _cmd_logs_follow_all(tail_lines: int) -> int:
                     line = f.readline()
                     if not line:
                         break
+                    if events_only and not _is_event_line(line):
+                        continue
                     saw_any = True
                     sys.stdout.write(f"[{name}] {line}")
             if saw_any:
@@ -928,6 +983,44 @@ def cmd_self_test(args: argparse.Namespace) -> int:
             globals()["_pid_file"] = _orig_pid
             globals()["_heartbeat_path"] = _orig_hb
 
+    # 11g. Event filter predicate.
+    check("event filter: ENTER long line", _is_event_line(
+        "[14:30:00] ENTER long BTC/USDT @ 73000 (st_flip_up, ...)"))
+    check("event filter: ENTER short line", _is_event_line(
+        "[14:30:00] ENTER short ETH/USDT @ 2000 (st_flip_down, ...)"))
+    check("event filter: EXIT line", _is_event_line(
+        "[14:30:00] EXIT long BTC/USDT @ 74000 (take_profit)"))
+    check("event filter: BLOCK long line", _is_event_line(
+        "[14:30:00] BLOCK long BTC/USDT @ 73000 (volume_confirmation: ...)"))
+    check("event filter: BLOCK short line", _is_event_line(
+        "[14:30:00] BLOCK short ETH/USDT @ 2000 (funding_filter ...)"))
+    check("event filter: circuit-break line", _is_event_line(
+        "[14:30:00] circuit break tripped after 5 losing trades"))
+    check("event filter: Traceback line", _is_event_line(
+        "Traceback (most recent call last):"))
+    check("event filter: REJECTS ordinary tick line",
+          not _is_event_line(
+              "14:30:00 EDT tick BTC/USDT close=73509.70 st=DOWN line=75118"))
+    check("event filter: REJECTS funding diagnostic line",
+          not _is_event_line(
+              "14:30:00 EDT   funding: rate=-0.0029% pct=36.7 decision=allow"))
+    check("event filter: REJECTS vol diagnostic line",
+          not _is_event_line(
+              "14:30:00 EDT   vol: rv24=0.50% bucket=Q1 mult=1.00"))
+    check("event filter: REJECTS volume diagnostic line",
+          not _is_event_line(
+              "14:30:00 EDT   volume: signal=8.21 mean20=13.97 ratio=0.59 "
+              "decision=block_low_volume_flip"))
+    check("event filter: REJECTS waiting_for line",
+          not _is_event_line(
+              "14:30:00 EDT   waiting_for: SuperTrend flip UP + EMA50 > EMA200"))
+    check("event filter: REJECTS portfolio line",
+          not _is_event_line(
+              "14:30:00 EDT portfolio open=0/2  realized=+0.000%"))
+    check("event filter: REJECTS blockers line",
+          not _is_event_line(
+              "14:30:00 EDT   blockers: supertrend_direction=DOWN"))
+
     # 12. Argparse: --follow, --tail, -f all set follow=True.
     parser_t = argparse.ArgumentParser(prog="paper_lab")
     sub_t = parser_t.add_subparsers(dest="cmd")
@@ -936,11 +1029,17 @@ def cmd_self_test(args: argparse.Namespace) -> int:
     p_logs_t.add_argument("--lines", type=int, default=50)
     p_logs_t.add_argument("--follow", "-f", "--tail",
                           action="store_true", dest="follow")
+    p_logs_t.add_argument("--events", action="store_true")
     for flag in ["--follow", "--tail", "-f"]:
         ns = parser_t.parse_args(["logs", "--variant", "current_best", flag])
         check(f"argparse: '{flag}' sets follow=True", ns.follow is True)
     ns_default = parser_t.parse_args(["logs", "--variant", "current_best"])
     check("argparse: no flag -> follow=False", ns_default.follow is False)
+    ns_events = parser_t.parse_args(
+        ["logs", "--variant", "current_best", "--events"])
+    check("argparse: --events sets events=True", ns_events.events is True)
+    check("argparse: no --events -> events=False",
+          ns_default.events is False)
 
     if failures:
         print(f"\nSELF-TEST FAILED ({failures})")
@@ -968,6 +1067,9 @@ def main(argv: list[str]) -> int:
     p_logs.add_argument("--follow", "-f", "--tail", action="store_true",
                         dest="follow",
                         help="stream new log lines as they arrive (tail -f)")
+    p_logs.add_argument("--events", action="store_true",
+                        help="only show actionable lines: ENTER, EXIT, "
+                             "BLOCK long/short, circuit-break, errors")
 
     args = parser.parse_args(argv)
 
