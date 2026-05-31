@@ -45,6 +45,24 @@ grouped by layer so it's clear where each future experiment fits.
 - Funding + HMM redundancy test (Issue #20 noted both attack the
   same regime concept; an explicit stacked vs single comparison
   on the long-short variant would settle redundancy).
+- Online walk-forward adaptive learning simulator — **shipped
+  research-only in Issue #32.** Tested 6 adaptive sizing rules
+  (`none`, `rolling_decay_size`, `consecutive_loss_size`,
+  `stop_cluster_size`, `vol_sizing`, `ensemble`) against the
+  24-month live config with strict no-future-leakage memory.
+  Confirmed: `vol_sizing` is the best single rule (DD halved,
+  PF improved, 71% of baseline return); `ensemble` best on
+  risk-adjusted basis; `rolling_decay_size` /
+  `consecutive_loss_size` underperform (too lagged); the bot is
+  not learning today. See
+  `research/online_walk_forward_report.md`. Suggested next
+  implementation: switch the adopted yaml to `vol_sizing` after
+  the Issue #33 forward paper test passes.
+- Hedge-fund-style adaptive risk stack (online HMM with per-bar
+  probability updates; Bayesian "is the strategy alive?"
+  posterior; volatility-targeting with continuous notional cap;
+  cross-asset gross/net exposure cap). All sketched in the Issue
+  #32 report (question 9).
 
 ### Execution backlog
 
@@ -139,6 +157,9 @@ tuning to make a variant cross the bar after the fact.
 | **BTC/ETH parallel portfolio (Issue #14 reference, ADOPTED)** | **2.50** | **+39.72%** | **adopted as research candidate** — passes ALL five locked gates (trades 65, PF 2.50, DD 5.54%, return +39.72%, max single-asset share 51%). Strictly dominates the Issue #12 one-position multi-asset variant (more trades, much lower DD, equal PF). Same engine, no overlay — just drop the one-position constraint. |
 | BTC/ETH parallel + funding filter (Issue #7) | 2.57 | +40.01% | adopted as marginal research candidate — 63 trades, DD 4.68% (-15.5% vs baseline), PF +0.07. Improvement is real but small (only 2 of 65 trades affected). Phase 2 diagnostics showed SuperTrend entries rarely coincide with extreme-funding bars. Not a primary strategy. |
 | ETH SuperTrend + funding filter (Issue #7) | 3.17 | +38.46% | marginal pass — 28 trades, PF +0.25 vs ETH baseline, DD unchanged. Effect within fold noise. Not adopted as primary; informational only. |
+| Recent-window decay investigation — TF sweep (Phase 3) | 2.10-3.35 | +26 to +269% | 4h still dominates the joint (long-term return-adjusted DD) axis. No TF change recommended. |
+| Recent-window — MTF confirmation A/B/C/D (Phase 4) | 1.54-3.22 | +25.75 to +101.51% | All 4 fail Issue #20 adoption gates. Variant D (1h early-exit) actively destroys the strategy. **All MTF gating REJECTED.** |
+| Recent-window — adaptive sizing rules R1-R6 (Phase 5) | 3.10-4.63 | +29.96 to +135.70% | R6 (vol_quartile sizing) dominates; reproduces Issue #27 exactly. R5 (HMM-adverse) runner-up. R2 (3-consec-loss) nearly-free soft circuit breaker. R1 / R3 / R4 rejected. Recommended action: switch live config to `state/live_multiasset_long_short_funding_vol.yaml` (Issue #33 wiring). |
 
 ## Rejected experiment patterns
 

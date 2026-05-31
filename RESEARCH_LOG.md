@@ -433,6 +433,85 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Online walk-forward adaptive learning simulator (Issue #32) — research
+
+Goal: test the bot's behaviour under *truly online* adaptation,
+where each historical 4h bar is treated as if it were live and the
+worker can only see the past. No future leakage. No parameter
+tuning. No live wiring.
+
+Phase 1 audit: `research/current_adaptation_audit.md`. Headline
+finding: the adopted multi-asset live worker
+(`hermes_trading/multi_loop.py`) is **not learning** in any
+meaningful sense. Every strategy / risk parameter is fixed in
+yaml; the only intra-trade adaptation is the SuperTrend trailing
+stop (which is indicator behaviour, not learning). Reflection
+(`reflect.py`) is wired into `loop.run` but not into
+`multi_loop.run`. The decay monitor is report-only. Issue #33's
+`LiveVolSizingOverlay` is opt-in and stays off in the adopted yaml.
+
+Simulator: `scripts/run_online_walk_forward.py`. CLI:
+`--config <yaml> --months <N> --adaptive-rule <name>`. Six rules:
+`none`, `rolling_decay_size`, `consecutive_loss_size`,
+`stop_cluster_size`, `vol_sizing`, `ensemble`. All multipliers
+locked at the Issue #32 spec values (no tuning). Sizing locks at
+entry; never resizes open trades. Reuses
+`signals.long_entry/long_exit/short_entry/short_exit/initial_stop`,
+`multi_loop.LiveFundingOverlay` and `evaluate_funding_gate`, and
+the Issue #29 `RESEARCH_FEE_PER_SIDE` / `RESEARCH_SLIPPAGE`
+constants — fill convention is bit-for-bit the live worker's.
+
+Headline numbers (24mo OOS, 2024-05-01 → 2026-04-30, BTC+ETH 4h,
+75 closed trades — identical across all 6 rules because adaptive
+rules in this study only resize, they never gate):
+
+| rule | total return | max DD | PF | mean mult | ret/exp |
+|---|---:|---:|---:|---:|---:|
+| `none` | +29.36% | 16.23% | 1.37 | 1.000 | +29.36% |
+| `rolling_decay_size` | +6.77% | 16.23% | 1.13 | 0.817 | +8.29% |
+| `consecutive_loss_size` | +14.27% | 14.11% | 1.23 | 0.887 | +16.10% |
+| `stop_cluster_size` | +14.12% | 8.72% | 1.51 | 0.350 | +40.35% |
+| `vol_sizing` | **+20.78%** | **7.78%** | 1.51 | 0.553 | +37.55% |
+| `ensemble` | +13.60% | **5.63%** | 1.55 | 0.313 | **+43.39%** |
+
+Window comparison: vol_sizing's ranking is stable across the 3 /
+6 / 12 / 24 mo windows. `ensemble` always has the lowest DD;
+`vol_sizing` always has the highest absolute return among the
+adaptive rules. `none` wins absolute return on the latest 3-month
+window but at 16.23% DD vs vol_sizing's 7.78%. `rolling_decay_size`
+loses on every measure — too lagged to protect, costs return on
+recoveries.
+
+Conclusions (full text in `research/online_walk_forward_report.md`):
+
+- The bot is **not learning today** and any first live adaptation
+  should be the safest possible.
+- **vol_sizing is the best single rule.** Halves DD, improves PF,
+  keeps 71% of return. Already proven in Issue #27 offline; this
+  experiment confirms it survives an *online* feedback loop.
+- `ensemble` is best on risk-adjusted basis but spends too much
+  time at the 0.25 floor for it to be a reasonable default.
+- `rolling_decay_size` and `consecutive_loss_size` are decay-by-
+  outcome rules and underperformed. They lag the regime.
+- `stop_cluster_size` works but is also a low-floor (0.35 mean
+  mult) rule.
+
+Next implementation issue should be: turn on `vol_sizing` (Issue
+#33's `LiveVolSizingOverlay`) in the adopted yaml after a 4-week
+forward-paper test. Do NOT enable rolling_decay_size,
+consecutive_loss_size, stop_cluster_size, or ensemble in live —
+they all over-throttle.
+
+Outputs:
+- `research/current_adaptation_audit.md`
+- `research/online_walk_forward_report.md`
+- `results/online_walk_forward_decisions_*_20260531_073952.csv`
+- `results/online_walk_forward_trades_*_20260531_073952.csv`
+- `results/online_walk_forward_comparison_20260531_073952.csv`
+
+Tests: 21 new checks in Section 15 of
+`scripts/test_multiasset_worker.py`. 260/260 pass.
+
 ## Vol-sizing overlay wired opt-in to live (Issue #33) — shipped
 
 After Issues #27 (research), #27 follow-up (`research/recent_adaptation_sizing_report.md`)
@@ -1019,6 +1098,102 @@ decisions, resize positions, or auto-disable strategies. Cron / Slack
 later via the exit code or the JSON output.
 
 See `research/decay_monitor_report.md`.
+
+## Recent-window decay investigation (May 2026) — research
+
+After a visibly bad recent 3-month live-replay window (user-reported
+6 trades, -9.61%, DD 9.61% over Feb-Apr 2026), this multi-phase
+investigation revalidated the adopted candidate, tested whether the
+bad run was decay or noise, and tested 13 possible adaptations.
+Headline: **the strategy is not decayed.** The recent window sits at
+~p21 of the historical 90-day distribution; the worst windows in the
+48-month history were -10.31% (late-2022 chop) and the strategy
+recovered from those. Walk-forward OOS on the SAME 48 months
+reproduces Issue #20 exactly: 123 trades, +139.71%, DD 4.64%, PF 3.35.
+
+Phases:
+
+1. **Phase 1 — forensic 3-month diagnostic** (`research/recent_regime_failure_report.md`,
+   `results/recent_regime_failure_trades_20260531_072648.csv`,
+   `scripts/diagnose_recent_regime.py`).
+   10 trades in the window, 100% stop exits, PF 0.105, net -6.55%.
+   6 of 10 entries fell in the HIGH realised-vol band (above the
+   prior 6-month upper quartile). 9 of 10 had 1h SuperTrend
+   agreeing with the 4h entry direction — alpha was internally
+   consistent. Funding gate had nothing to block (percentile range
+   9.7-72.8). The losses were straightforward chop, not signal
+   decay.
+
+2. **Phase 2 — rolling decay over 48 months** (`research/rolling_decay_report.md`,
+   `results/rolling_decay_metrics_20260531_072839.csv`,
+   `results/rolling_decay_trades_20260531_072839.csv`,
+   `scripts/run_rolling_decay.py`).
+   90-day windows: mean -0.69%, p25 -3.74%, fraction below -5% is
+   20.6%, fraction below -9.61% is 1.5%. Recent 90d return is
+   -2.78% (continuous replay), comfortably within historical
+   distribution. The decay monitor's defaults (PF<1.20,
+   trailing-CL≥4) would have fired on the recent window — and
+   on 54% and 26% of historical windows respectively. The
+   existing thresholds are too noisy to drive a binary "stop
+   trading" alarm; the recommended pivot is to use a continuous
+   sizing signal (Phase 5 R6) instead of a binary monitor verdict.
+
+3. **Phase 3 — timeframe comparison** (`research/timeframe_comparison_report.md`,
+   `results/timeframe_comparison_20260531_073039.{csv,md}`,
+   `results/timeframe_trades_20260531_073039.csv`,
+   `scripts/run_timeframe_comparison.py`).
+   Tested 1h, 2h, 4h, 1d on the same long-short + funding
+   strategy. 4h dominates on PF (3.35 vs 2.10-2.26 on faster
+   TFs, 2.19 on 1d) and DD (4.64% vs 7.19-8.25%, 15.13%). On the
+   recent 3mo all four TFs are positive in walk-forward OOS;
+   2h is best (+18.91% / DD 1.73%) but its full-window DD is
+   nearly 2× worse than 4h. **Verdict: 4h stays.**
+
+4. **Phase 4 — MTF confirmation variants** (`research/multitimeframe_confirmation_report.md`,
+   `results/multitimeframe_confirmation_{20260531_073251}.{csv,md}`,
+   `scripts/run_multitimeframe_confirmation.py`).
+   Tested A (1d agreement filter), B (1h agreement filter),
+   C (agreement-scaled size), D (1h early-warning exit). All four
+   fail Issue #20 adoption gates. D is catastrophic (PF 1.54).
+   A is the best of the rest but gives up 27% of return for a
+   modest DD improvement. **Verdict: no MTF confirmation.**
+
+5. **Phase 5 — adaptive risk-layer rules** (`research/adaptive_regime_response_report.md`,
+   `results/adaptive_regime_response_{20260531_073505}.{csv,md}`,
+   `results/adaptive_regime_response_trades_20260531_073505.csv`,
+   `scripts/run_adaptive_regime_response.py`).
+   Tested 6 rules: R1 PF<1.0 pause, R2 3-consec-loss half-size,
+   R3 30d-return half-size, R4 stop-freq half-size, R5 HMM-adverse
+   half-size, R6 vol-quartile sizing. **R6 dominates**: 48mo PF
+   3.35 → 4.63, DD 4.64% → 2.10%, return -48%; recent 3mo PF 2.36
+   → 3.70, DD 4.40% → 1.44%, return -39%. R6 also reproduces the
+   Issue #27 finding exactly. R5 is the runner-up. R2 is a
+   nearly-free soft circuit breaker. R1 / R3 / R4 are rejected.
+
+6. **Phase 6 — final synthesis** (`research/recent_adaptation_final_report.md`).
+   The recommended action is to **switch the live worker config**
+   to `state/live_multiasset_long_short_funding_vol.yaml` (the
+   Issue #33 opt-in yaml). No code change. No alpha change. The
+   sizing layer was already built and tested under Issues #27
+   and #33; this investigation provides the empirical case for
+   the user to flip the switch.
+
+Hard rules respected throughout: no live config edits, no
+strategy edits, no parameter tuning on full history, all
+evaluations walk-forward (train=1440 / test=360 / embargo=6 for
+4h; scaled for other TFs), fee=0.001/side + slippage=0.0005,
+same SuperTrend(10,3), same BTC+ETH universe, same direction-aware
+funding gate.
+
+New research scripts (read-only):
+`scripts/diagnose_recent_regime.py`, `scripts/run_rolling_decay.py`,
+`scripts/run_timeframe_comparison.py`,
+`scripts/run_multitimeframe_confirmation.py`,
+`scripts/run_adaptive_regime_response.py`.
+
+`signals.py` unchanged. Live configs unchanged. `py_compile`
+clean. Test trio (multi-asset worker + decay monitor self-test +
+py_compile) passes.
 
 ## Recommended next experiment
 

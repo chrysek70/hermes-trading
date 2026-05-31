@@ -5,6 +5,53 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Online walk-forward adaptive learning simulator (Issue #32) —
+  research-only. `scripts/run_online_walk_forward.py` replays
+  every 4h closed bar as if it were live, with strict
+  no-future-leakage closed-trade memory. Six adaptive sizing
+  rules tested: `none` baseline (+29.36% / 16.23% DD over 24mo),
+  `rolling_decay_size` (+6.77% / 16.23%), `consecutive_loss_size`
+  (+14.27% / 14.11%), `stop_cluster_size` (+14.12% / 8.72%),
+  **`vol_sizing` (+20.78% / 7.78%, PF 1.51, best balance)**, and
+  `ensemble` (+13.60% / 5.63% DD, lowest DD). All 6 rules close
+  exactly 75 trades; multipliers MIN out at 0.25 so signals are
+  never gated. Reuses `signals.long_entry/exit`,
+  `multi_loop.LiveFundingOverlay`, `evaluate_funding_gate`, and
+  the Issue #29 fee/slippage constants verbatim. CLI:
+  `--config <yaml> --months <N> --adaptive-rule <name>` plus
+  `--compare-all-rules`. Outputs decision/trade CSVs per rule
+  and a per-window comparison CSV (3 / 6 / 12 / 24mo). Phase 1
+  audit: `research/current_adaptation_audit.md`. Final report:
+  `research/online_walk_forward_report.md`. 21 new self-test
+  checks in Section 15 of `scripts/test_multiasset_worker.py`
+  (260/260 pass). `signals.py` / `multi_loop.py` / `loop.py` /
+  `run.py` and all `state/*.yaml` unchanged. Recommended next
+  implementation: switch the adopted yaml to vol_sizing after
+  the Issue #33 forward paper test passes.
+- ✓ Recent-window decay investigation (May 2026) — research.
+  Six-phase autonomous investigation triggered by a visibly bad
+  recent 3-month live-replay window. Headline: the adopted live
+  candidate is NOT decayed; the recent window sits at ~p21 of the
+  historical 90-day distribution and walk-forward OOS on the same
+  48 months still returns Issue #20's adoption numbers (123 trades,
+  +139.71%, DD 4.64%, PF 3.35). New research scripts:
+  `scripts/diagnose_recent_regime.py`, `scripts/run_rolling_decay.py`,
+  `scripts/run_timeframe_comparison.py`,
+  `scripts/run_multitimeframe_confirmation.py`,
+  `scripts/run_adaptive_regime_response.py`. Six reports under
+  `research/recent_*` and `research/rolling_decay_report.md`,
+  `research/timeframe_comparison_report.md`,
+  `research/multitimeframe_confirmation_report.md`,
+  `research/adaptive_regime_response_report.md`,
+  `research/recent_adaptation_final_report.md`. Phase 5 reconfirmed
+  vol-quartile sizing (Issue #27 → #33 wiring) as the strongest
+  adaptation: 48mo DD 4.64% → 2.10%, recent 3mo DD 4.40% → 1.44%.
+  Recommended live action: operator switch from
+  `state/live_multiasset_long_short_funding.yaml` to
+  `state/live_multiasset_long_short_funding_vol.yaml` (already
+  shipped under Issue #33; no code change required).
+  `signals.py` unchanged. Live configs unchanged. `py_compile`
+  clean; multi-asset worker + decay monitor self-tests pass.
 - ✓ Vol-sizing overlay wired opt-in to live (Issue #33).
   `LiveVolSizingOverlay` in `multi_loop.py` mirrors the existing
   funding overlay; new yaml `state/live_multiasset_long_short_funding_vol.yaml`
