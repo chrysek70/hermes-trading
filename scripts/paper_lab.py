@@ -34,8 +34,14 @@ Usage
     uv run python scripts/paper_lab.py status
     uv run python scripts/paper_lab.py compare
     uv run python scripts/paper_lab.py logs --variant current_best [--lines 50]
+    uv run python scripts/paper_lab.py logs --variant current_best --tail
+    uv run python scripts/paper_lab.py logs --variant all --tail
     uv run python scripts/paper_lab.py stop
     uv run python scripts/paper_lab.py --self-test
+
+`logs --tail` (alias `--follow` or `-f`) streams new log lines as they
+arrive, like `tail -f`. Ctrl-C exits. Use ``--variant all`` to multi-tail
+every variant with line prefixes.
 """
 from __future__ import annotations
 
@@ -48,7 +54,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -371,6 +377,72 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _classify_heartbeat(
+    name: str,
+    pid: int | None,
+    hb: dict | None,
+    now: datetime | None = None,
+) -> tuple[str, str]:
+    """Decide what to display for the heartbeat line.
+
+    Compares the heartbeat ts against the ``worker.pid`` file's mtime:
+    a heartbeat written BEFORE the current worker.pid was created is a
+    leftover from a previous worker generation that has not been
+    overwritten yet (the new worker is still loading overlays).
+
+    Returns ``(headline, detail)`` where headline goes after
+    ``"last heartbeat"`` and detail goes on the next line indented.
+    """
+    now = now or datetime.now(timezone.utc)
+    pid_path = _pid_file(name)
+    pid_mtime = None
+    if pid_path.exists():
+        pid_mtime = datetime.fromtimestamp(pid_path.stat().st_mtime, tz=timezone.utc)
+    hb_ts = hb.get("ts") if hb else None
+    hb_dt = None
+    if hb_ts:
+        try:
+            hb_dt = _parse_ts(hb_ts)
+        except Exception:
+            hb_dt = None
+
+    if pid is None:
+        # Worker not running. Heartbeat (if present) is from a prior run.
+        if hb_dt is None:
+            return ("(none)", "")
+        age = (now - hb_dt).total_seconds()
+        return (f"{hb_ts}  ({age:.0f}s ago, from previous run)", "")
+
+    # Worker IS running.
+    if hb_dt is None:
+        # No heartbeat at all yet.
+        worker_age = "?"
+        if pid_mtime is not None:
+            worker_age = f"{(now - pid_mtime).total_seconds():.0f}s"
+        return (
+            f"warming up (PID {pid} spawned {worker_age} ago, no heartbeat yet)",
+            "",
+        )
+
+    age = (now - hb_dt).total_seconds()
+    if pid_mtime is not None and hb_dt < pid_mtime:
+        # Heartbeat predates the current worker generation.
+        worker_age = (now - pid_mtime).total_seconds()
+        return (
+            f"warming up (PID {pid} spawned {worker_age:.0f}s ago, "
+            f"no fresh heartbeat yet)",
+            f"prior-run heartbeat: {hb_ts}  ({age:.0f}s ago)",
+        )
+
+    # Fresh heartbeat. Flag old-but-fresh-generation as stale.
+    if age >= 60:
+        return (
+            f"{hb_ts}  ({age:.0f}s ago, STALE — worker may be stuck)",
+            "",
+        )
+    return (f"{hb_ts}  ({age:.0f}s ago)", "")
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     print(f"PAPER LAB STATUS  ({datetime.now(timezone.utc).isoformat(timespec='seconds')})")
     print("=" * 78)
@@ -384,14 +456,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         stats = _compute_stats(trades)
         hb = _load_heartbeat(name)
         blocks = _count_blocks(name)
-        hb_ts = hb.get("ts") if hb else None
-        hb_age = "n/a"
-        if hb_ts:
-            try:
-                age_s = (datetime.now(timezone.utc) - _parse_ts(hb_ts)).total_seconds()
-                hb_age = f"{age_s:.0f}s ago"
-            except Exception:
-                pass
+        hb_headline, hb_detail = _classify_heartbeat(name, pid, hb)
         open_positions = 0
         unrealized_pct = 0.0
         if hb:
@@ -410,7 +475,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  PF                 {stats.pf_str}")
         print(f"  open positions     {open_positions}")
         print(f"  unrealized PnL     {unrealized_pct:+.2f}%")
-        print(f"  last heartbeat     {hb_ts}  ({hb_age})")
+        print(f"  last heartbeat     {hb_headline}")
+        if hb_detail:
+            print(f"                     {hb_detail}")
         print(f"  blocks (by reason) funding_long={blocks['funding_block_long']}  "
               f"funding_short={blocks['funding_block_short']}  "
               f"volume_conf={blocks['volume_confirmation_block']}  "
@@ -475,19 +542,129 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
+    if args.variant == "all":
+        # Multi-tail: stream all variants concurrently, prefixing each
+        # line with its variant name so a single terminal can watch
+        # the whole lab at once. Requires --follow.
+        if not args.follow:
+            print("--variant all only makes sense with --follow", file=sys.stderr)
+            return 2
+        return _cmd_logs_follow_all(args.lines)
+
     if args.variant not in VARIANTS:
         print(f"unknown variant: {args.variant}", file=sys.stderr)
-        print(f"available: {', '.join(VARIANTS.keys())}", file=sys.stderr)
+        print(f"available: {', '.join(VARIANTS.keys())} (or 'all' with --follow)",
+              file=sys.stderr)
         return 2
     p = _log_file(args.variant)
     if not p.exists():
         print(f"(no log yet: {p})")
         return 0
     n = args.lines
+
+    if args.follow:
+        return _cmd_logs_follow_one(args.variant, p, n)
+
     lines = p.read_text(errors="replace").splitlines()
     for line in lines[-n:]:
         print(line)
     return 0
+
+
+def _cmd_logs_follow_one(variant: str, p: Path, tail_lines: int) -> int:
+    """`tail -f` one variant's log. Ctrl-C to exit."""
+    # Switch stdout to line-buffered so streaming works under any
+    # redirection (pipe, file, tee). Without this, follow mode looks
+    # frozen when output is not a tty.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except AttributeError:
+        pass
+    print(f"# follow {variant}  log={p.relative_to(ROOT)}  (Ctrl-C to exit)",
+          flush=True)
+    # Print the last `tail_lines` lines first, then stream new content.
+    with p.open("r", errors="replace") as f:
+        existing = f.read().splitlines()
+        for line in existing[-tail_lines:]:
+            print(line, flush=True)
+        # Seek to end and follow.
+        f.seek(0, 2)
+        try:
+            while True:
+                line = f.readline()
+                if not line:
+                    # No new data; check the worker is still alive.
+                    if is_running(variant) is None:
+                        # Worker died — keep tailing in case it gets
+                        # restarted (file may grow again).
+                        pass
+                    time.sleep(0.5)
+                    continue
+                sys.stdout.write(line)
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            print()
+            print(f"# stopped following {variant}")
+            return 0
+
+
+def _cmd_logs_follow_all(tail_lines: int) -> int:
+    """Stream all variants concurrently, one prefixed line per write.
+
+    Uses one filehandle per variant + a simple round-robin readline
+    poll. No threads, no select on regular files (which is unsupported
+    for regular files anyway on most platforms — they always read
+    ready).
+    """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except AttributeError:
+        pass
+    print("# follow ALL variants  (Ctrl-C to exit)", flush=True)
+    handles: dict[str, "any"] = {}
+    for name in VARIANTS:
+        p = _log_file(name)
+        if not p.exists():
+            print(f"# (no log yet for {name}; will pick up when created)",
+                  flush=True)
+            continue
+        f = p.open("r", errors="replace")
+        existing = f.read().splitlines()
+        for line in existing[-tail_lines:]:
+            print(f"[{name}] {line}", flush=True)
+        f.seek(0, 2)
+        handles[name] = f
+
+    try:
+        while True:
+            saw_any = False
+            # Pick up any newly-created logs.
+            for name in VARIANTS:
+                if name in handles:
+                    continue
+                p = _log_file(name)
+                if p.exists():
+                    f = p.open("r", errors="replace")
+                    f.seek(0, 2)
+                    handles[name] = f
+                    print(f"# log for {name} appeared, tracking", flush=True)
+            for name, f in handles.items():
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    saw_any = True
+                    sys.stdout.write(f"[{name}] {line}")
+            if saw_any:
+                sys.stdout.flush()
+            else:
+                time.sleep(0.5)
+    except KeyboardInterrupt:
+        print()
+        print("# stopped following ALL variants")
+        for f in handles.values():
+            f.close()
+        return 0
 
 
 def cmd_self_test(args: argparse.Namespace) -> int:
@@ -617,17 +794,26 @@ def cmd_self_test(args: argparse.Namespace) -> int:
           main_fp_after == main_fp_before)
 
     # 7. is_running returns None for a fake/dead pid.
-    fake_pid_path = _pid_file("current_best")
-    real_pid_state = fake_pid_path.read_text() if fake_pid_path.exists() else None
+    # Uses a synthetic variant name so we never touch a real worker's
+    # pid file (rewriting it would bump mtime and confuse
+    # _classify_heartbeat into reporting "warming up" the next time the
+    # operator runs `status`).
+    synth_name = "_selftest_dead_pid"
+    fake_pid_path = LAB_ROOT / synth_name / "worker.pid"
+    fake_pid_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fake_pid_path.write_text("99999999")
+        # Direct call: is_running uses _pid_file(name) so we need the
+        # synthetic name to resolve to the path we just wrote.
+        # _pid_file is just LAB_ROOT / name / "worker.pid", so this works.
         check("is_running returns None for dead PID",
-              is_running("current_best") is None)
+              is_running(synth_name) is None)
     finally:
-        if real_pid_state is None:
-            fake_pid_path.unlink(missing_ok=True)
-        else:
-            fake_pid_path.write_text(real_pid_state)
+        fake_pid_path.unlink(missing_ok=True)
+        try:
+            fake_pid_path.parent.rmdir()
+        except OSError:
+            pass
 
     # 8. Stats: empty trades -> zeros.
     s_empty = _compute_stats([])
@@ -668,6 +854,94 @@ def cmd_self_test(args: argparse.Namespace) -> int:
     ]:
         check(f"hermes_trading.run has no {label}", tok not in main_run_src)
 
+    # 11. Heartbeat classifier covers warmup / fresh / stale / prior-run.
+    import tempfile as _tmp
+    with _tmp.TemporaryDirectory() as _td:
+        _td_path = Path(_td)
+        # Monkey-patch _pid_file / _heartbeat_path to point into the
+        # temp dir so the test does not race with real state files.
+        _orig_pid = globals()["_pid_file"]
+        _orig_hb = globals()["_heartbeat_path"]
+        globals()["_pid_file"] = lambda n: _td_path / f"{n}.pid"
+        globals()["_heartbeat_path"] = lambda n: _td_path / f"{n}.hb.json"
+        try:
+            now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+            # 11a. Worker stopped, no heartbeat -> "(none)"
+            headline, detail = _classify_heartbeat("v1", None, None, now=now)
+            check("classify: stopped + no hb -> (none)",
+                  headline == "(none)" and detail == "")
+
+            # 11b. Worker stopped, old heartbeat -> "from previous run"
+            old_hb = {"ts": "2026-05-31T11:00:00+00:00"}
+            headline, _ = _classify_heartbeat("v1", None, old_hb, now=now)
+            check("classify: stopped + old hb -> 'from previous run'",
+                  "from previous run" in headline,
+                  f"got {headline!r}")
+
+            # 11c. Worker running, no heartbeat yet, PID file fresh -> warming up
+            pid_path = _td_path / "v2.pid"
+            pid_path.write_text("99999")
+            mtime = (now - timedelta(seconds=8)).timestamp()
+            os.utime(pid_path, (mtime, mtime))
+            headline, _ = _classify_heartbeat("v2", 99999, None, now=now)
+            check("classify: running + no hb -> warming up + worker age",
+                  "warming up" in headline and "8s ago" in headline,
+                  f"got {headline!r}")
+
+            # 11d. Worker running, heartbeat predates pid mtime -> warming up,
+            #     show prior-run hb in detail
+            old_hb2 = {"ts": "2026-06-01T11:59:30+00:00"}  # 30s old, BEFORE pid (8s old)
+            headline, detail = _classify_heartbeat("v2", 99999, old_hb2, now=now)
+            check("classify: running + pre-pid hb -> warming up headline",
+                  "warming up" in headline,
+                  f"got {headline!r}")
+            check("classify: running + pre-pid hb -> prior-run detail",
+                  "prior-run heartbeat" in detail and "30s ago" in detail,
+                  f"got {detail!r}")
+
+            # 11e. Worker running, fresh heartbeat (after pid mtime, < 60s) -> fresh
+            pid_path2 = _td_path / "v3.pid"
+            pid_path2.write_text("77777")
+            mtime2 = (now - timedelta(seconds=30)).timestamp()
+            os.utime(pid_path2, (mtime2, mtime2))
+            fresh_hb = {"ts": "2026-06-01T11:59:55+00:00"}  # 5s ago, after pid (30s ago)
+            headline, detail = _classify_heartbeat("v3", 77777, fresh_hb, now=now)
+            check("classify: running + fresh hb -> clean age line",
+                  "5s ago" in headline
+                  and "warming up" not in headline
+                  and "STALE" not in headline,
+                  f"got {headline!r}")
+
+            # 11f. Worker running, but heartbeat is > 60s old AND newer than
+            #     pid mtime (pid older still) -> STALE
+            pid_path3 = _td_path / "v4.pid"
+            pid_path3.write_text("66666")
+            mtime3 = (now - timedelta(seconds=300)).timestamp()
+            os.utime(pid_path3, (mtime3, mtime3))
+            stale_hb = {"ts": "2026-06-01T11:58:00+00:00"}  # 120s ago, after pid (300s ago)
+            headline, _ = _classify_heartbeat("v4", 66666, stale_hb, now=now)
+            check("classify: running + 120s-old hb (post-pid) -> STALE",
+                  "STALE" in headline,
+                  f"got {headline!r}")
+        finally:
+            globals()["_pid_file"] = _orig_pid
+            globals()["_heartbeat_path"] = _orig_hb
+
+    # 12. Argparse: --follow, --tail, -f all set follow=True.
+    parser_t = argparse.ArgumentParser(prog="paper_lab")
+    sub_t = parser_t.add_subparsers(dest="cmd")
+    p_logs_t = sub_t.add_parser("logs")
+    p_logs_t.add_argument("--variant", required=True)
+    p_logs_t.add_argument("--lines", type=int, default=50)
+    p_logs_t.add_argument("--follow", "-f", "--tail",
+                          action="store_true", dest="follow")
+    for flag in ["--follow", "--tail", "-f"]:
+        ns = parser_t.parse_args(["logs", "--variant", "current_best", flag])
+        check(f"argparse: '{flag}' sets follow=True", ns.follow is True)
+    ns_default = parser_t.parse_args(["logs", "--variant", "current_best"])
+    check("argparse: no flag -> follow=False", ns_default.follow is False)
+
     if failures:
         print(f"\nSELF-TEST FAILED ({failures})")
         return 1
@@ -688,8 +962,12 @@ def main(argv: list[str]) -> int:
     sub.add_parser("compare")
 
     p_logs = sub.add_parser("logs")
-    p_logs.add_argument("--variant", required=True)
+    p_logs.add_argument("--variant", required=True,
+                        help="variant name, or 'all' (with --follow/--tail)")
     p_logs.add_argument("--lines", type=int, default=50)
+    p_logs.add_argument("--follow", "-f", "--tail", action="store_true",
+                        dest="follow",
+                        help="stream new log lines as they arrive (tail -f)")
 
     args = parser.parse_args(argv)
 
