@@ -2090,6 +2090,23 @@ def main() -> int:
           '"  volume {asset} signal=' in replay_src_18)
     print()
 
+    # --- 19. Funding-archive current-month 404 logged as expected absence
+    # (not as a yellow warning). Source-level check only — we don't hit the
+    # network here.
+    print("19. Funding loader current-month 404 cleanup")
+    funding_src_19 = (ROOT / "hermes_trading" / "funding.py").read_text()
+    check("funding loader detects current calendar month",
+          "current_month_str" in funding_src_19
+          and 'strftime("%Y-%m")' in funding_src_19)
+    check("funding loader downgrades current-month 404 to gray informational",
+          "is_current_month_404" in funding_src_19
+          and "[gray]Funding archive" in funding_src_19
+          and "not yet" in funding_src_19
+          and "published (expected for current month)" in funding_src_19)
+    check("funding loader still logs OTHER failures as yellow warnings",
+          "[yellow]skip" in funding_src_19)
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:

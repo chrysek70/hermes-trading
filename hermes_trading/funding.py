@@ -73,12 +73,28 @@ def load_funding(symbol: str = "BTCUSDT", n_months: int = 48,
                  end: pd.Timestamp | None = None,
                  months: list[str] | None = None) -> pd.DataFrame:
     months = months or _months(n_months, end)
+    # The current calendar month's archive is published by Binance Vision
+    # only AFTER the month closes. Until then a 404 is the expected
+    # absence of data, not an error. Downgrade those specific 404s from
+    # yellow ("warning") to gray ("informational") so the operator can
+    # tell them apart from real failures (HTTP 5xx, network errors,
+    # historical archives missing, etc.).
+    current_month_str = pd.Timestamp.utcnow().strftime("%Y-%m")
     frames = []
     for m in months:
         try:
             frames.append(_load_month(symbol, m))
         except RuntimeError as exc:  # noqa: BLE001
-            log(f"[yellow]skip {symbol} funding {m}: {exc}[/yellow]")
+            msg = str(exc)
+            is_current_month_404 = (
+                m == current_month_str
+                and "HTTP 404" in msg
+            )
+            if is_current_month_404:
+                log(f"[gray]Funding archive for {symbol} {m} not yet "
+                    f"published (expected for current month).[/gray]")
+            else:
+                log(f"[yellow]skip {symbol} funding {m}: {exc}[/yellow]")
     if not frames:
         raise RuntimeError(f"no funding loaded for {symbol} in {months}")
     df = pd.concat(frames).sort_index()
