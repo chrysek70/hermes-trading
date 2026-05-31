@@ -433,6 +433,55 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Adaptive regime-based position sizing (Issue #27) — research
+
+Tested three sizing overlays on top of the currently adopted BTC/ETH
+long-short SuperTrend + funding-filter candidate (Issues #20 / #21).
+Question: can HMM or volatility-band sizing reduce DD or improve PF
+without materially cutting trade count? **All three sizing variants
+pass.** Trade count is identical across every variant (123) because
+the layer multiplies rather than gates.
+
+48-month walk-forward, 20 OOS folds, BTC + ETH parallel:
+
+| variant | trades | OOS return | max DD | PF | mean mult | ret/exp |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline_funding_only (= adopted live) | 123 | +139.71% | 4.64% | 3.35 | 1.000 | +139.71% |
+| hmm_sizing | 123 | +78.38% | 2.45% | 3.84 | 0.652 | +120.13% |
+| **vol_sizing** | 123 | +72.71% | **2.10%** | **4.63** | 0.533 | **+136.54%** |
+| hmm_plus_vol_sizing | 123 | +59.69% | **1.57%** | 4.49 | 0.472 | +126.59% |
+
+Key conceptual point: **the same HMM that failed as a hard filter
+(Issue #6 / #20) becomes a useful Risk-layer overlay when applied
+as a sizing multiplier instead.** The filter dropped trade count
+below the 100 gate; the multiplier preserves every signal.
+
+By-regime breakdown confirms the overlays separate cleanly:
+- HMM favourable: 58 trades, 63.8% win, +50.22% (~5× the adverse
+  band's +10.25% on similar count).
+- Vol low-quartile: 29 trades, 72.4% win, +30.28%; high-quartile:
+  42 trades, 50.0% win, +4.65% — win rate falls monotonically
+  with volatility band.
+
+Strongest candidate: `vol_sizing` — best PF, second-lowest DD,
+highest return-per-exposure (+136.54%, essentially preserving the
+baseline's efficiency at half the exposure), and the simplest
+implementation (no model fit, no heavy dependency).
+
+Recommendation: **do not wire to live yet.** Adding a sizing layer
+on top of the known live paper-fill slippage asymmetry would
+compound the live-vs-research drift. The Execution-layer slippage
+fix (item #1 on the architecture roadmap) is a prerequisite. After
+that ships, `vol_sizing` is the next live-candidate add-on.
+
+Files: `scripts/run_adaptive_sizing.py`,
+`research/adaptive_sizing_report.md`,
+`results/adaptive_sizing_comparison_20260531_005427.{csv,md}`,
+`results/trades_adaptive_sizing_20260531_005427.csv`.
+
+`signals.py` unchanged. No live config modified. `py_compile`
+clean.
+
 ## Replay multi-asset config support (Issue #26) — shipped
 
 `scripts/replay_live.py` now accepts `--config <multi-asset yaml>`

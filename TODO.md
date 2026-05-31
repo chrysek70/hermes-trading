@@ -5,6 +5,18 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Adaptive regime-based position sizing — research (Issue #27).
+  `scripts/run_adaptive_sizing.py` tested HMM-sizing, vol-quartile-sizing,
+  and stacked HMM+vol on top of the adopted long-short + funding
+  candidate over 48mo. **All three sizing variants pass the adoption
+  criterion** (reduce DD or improve PF without materially reducing
+  trade count — trade count is identical 123 across all four
+  variants because sizing is multiplicative). Strongest: `vol_sizing`
+  (PF 3.35 → 4.63, DD 4.64% → 2.10%, return-per-exposure preserved
+  at +136.54%). Detailed report:
+  `research/adaptive_sizing_report.md`. **Not wired to live** —
+  prerequisite is the live paper-fill slippage fix (item #1 on the
+  Execution-layer roadmap). User approval required before adoption.
 - ✓ Replay multi-asset config support (Issue #26) — `scripts/replay_live.py
   --config state/live_multiasset_long_short_funding.yaml` replays the
   exact adopted live candidate over historical data (BTC + ETH together,

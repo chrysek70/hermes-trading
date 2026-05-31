@@ -22,11 +22,18 @@ grouped by layer so it's clear where each future experiment fits.
 
 ### Risk backlog
 
-- HMM as sizing instead of hard filter (currently Issue #6 used
-  bimodal sizing → degenerated to filter; explicit half-size band
-  worth testing on the long-short universe).
-- Volatility targeting (resize per asset by realised vol → smoother
-  equity curve; expected to reduce DD without hurting PF).
+- HMM as sizing instead of hard filter — **tested on long-short +
+  funding in Issue #27.** Mapping {1.0, 0.5, 0.25}: PF 3.35 → 3.84,
+  DD 4.64% → 2.45%, trade count unchanged (123). Passes adoption
+  criterion; not yet live (gated on live paper-fill slippage fix).
+- Volatility-quartile sizing — **tested in Issue #27 and currently
+  the strongest sizing candidate**: PF 3.35 → 4.63, DD 4.64% →
+  2.10%, return-per-exposure essentially preserved (+136.54% vs
+  +139.71%), trade count unchanged. Next live add-on once the
+  Execution-layer slippage fix lands.
+- Volatility targeting (continuous, per-asset by realised vol →
+  smoother equity curve). The Issue #27 quartile mapping is
+  discrete; a continuous version is an obvious follow-up.
 - Dynamic exposure caps (lower `max_open_positions` during
   high-vol regimes).
 - Drawdown-based decay-monitor → automatic exposure reduction
