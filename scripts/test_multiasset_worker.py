@@ -575,6 +575,112 @@ def main() -> int:
           "funding_filter" not in long_only_cfg or not long_only_cfg.get("funding_filter"))
     print()
 
+    # --- 11. Display timezone formatter (Issue #22)
+    print("11. Display timezone formatter (Issue #22)")
+    from datetime import datetime, timezone, timedelta
+    from hermes_trading import (
+        format_display_time, set_display_time_mode, get_display_time_mode,
+        now_iso, DISPLAY_TIME_MODES,
+    )
+
+    # Default mode is LOCAL (Issue #22 — user's preference: local is the
+    # primary use case for interactive monitoring). UTC remains canonical
+    # for persisted artifacts.
+    # Note: prior tests in this script may have called set_display_time_mode,
+    # so we re-import the module fresh to verify the *module-level* default.
+    import importlib
+    import hermes_trading as ht_pkg
+    importlib.reload(ht_pkg)
+    check("module-level default display mode is 'local'",
+          ht_pkg.get_display_time_mode() == "local",
+          f"got {ht_pkg.get_display_time_mode()}")
+    set_display_time_mode("utc")  # for the next check series
+
+    # A fixed UTC instant — Apr 15 2026 02:39:01 UTC
+    sample = datetime(2026, 4, 15, 2, 39, 1, tzinfo=timezone.utc)
+    utc_str, utc_abbrev = format_display_time(sample, mode="utc")
+    check("UTC formatter returns 02:39:01 with no abbreviation",
+          utc_str == "02:39:01" and utc_abbrev == "",
+          f"got ({utc_str!r}, {utc_abbrev!r})")
+
+    local_str, local_abbrev = format_display_time(sample, mode="local")
+    # The host OS may be UTC (CI) or a specific zone (developer machine).
+    # We can't assert a specific abbreviation, but we can assert these:
+    check("local formatter returns 8 chars HH:MM:SS",
+          len(local_str) == 8 and local_str[2] == ":" and local_str[5] == ":",
+          f"got {local_str!r}")
+    # Abbreviation must be either non-empty OR (on UTC-host) empty —
+    # either way the format must not crash and must be a string.
+    check("local formatter returns str abbreviation (may be empty on UTC host)",
+          isinstance(local_abbrev, str), f"got {type(local_abbrev)}")
+
+    # Mode override
+    utc_via_override, _ = format_display_time(sample, mode="utc")
+    set_display_time_mode("local")
+    check("mode override respected when explicit",
+          format_display_time(sample, mode="utc")[0] == utc_via_override)
+    set_display_time_mode("utc")  # reset
+
+    # Invalid mode raises
+    raised = False
+    try:
+        set_display_time_mode("eastern")
+    except ValueError:
+        raised = True
+    check("invalid mode raises ValueError", raised)
+
+    # Market mode wired but NotImplemented — documented in the issue
+    raised = False
+    try:
+        set_display_time_mode("market")
+    except NotImplementedError:
+        raised = True
+    check("'market' mode raises NotImplementedError (reserved for future)",
+          raised)
+
+    # now_iso() must always be UTC regardless of display mode
+    set_display_time_mode("local")
+    iso_local = now_iso()
+    set_display_time_mode("utc")
+    iso_utc = now_iso()
+    set_display_time_mode("utc")  # reset
+
+    parsed_local = datetime.fromisoformat(iso_local)
+    parsed_utc = datetime.fromisoformat(iso_utc)
+    # Both must be UTC-aware
+    check("now_iso() in local mode produces UTC tz",
+          parsed_local.utcoffset() == timedelta(0),
+          f"got {parsed_local.utcoffset()}")
+    check("now_iso() in utc mode produces UTC tz",
+          parsed_utc.utcoffset() == timedelta(0),
+          f"got {parsed_utc.utcoffset()}")
+
+    # Naive utc input is treated as UTC, not local
+    naive = datetime(2026, 4, 15, 2, 39, 1)
+    aware_utc = datetime(2026, 4, 15, 2, 39, 1, tzinfo=timezone.utc)
+    s1, _ = format_display_time(naive, mode="utc")
+    s2, _ = format_display_time(aware_utc, mode="utc")
+    check("naive timestamp treated as UTC", s1 == s2,
+          f"got {s1!r} vs {s2!r}")
+
+    # run.py must declare --utc-time + aliases and the set_display_time_mode
+    # call. The default behaviour (no flag) leaves the module-level default
+    # ("local") intact, so the screen shows host time without any flag.
+    help_text_path = ROOT / "hermes_trading" / "run.py"
+    src = help_text_path.read_text()
+    for alias in ("--utc-time", "--bot-time", "--transaction-time"):
+        check(f"run.py source declares {alias} flag", alias in src,
+              f"alias {alias} not found in run.py")
+    check("run.py wires set_display_time_mode",
+          "set_display_time_mode" in src,
+          "set_display_time_mode call missing in run.py")
+
+    # DISPLAY_TIME_MODES tuple is the authoritative list
+    check("DISPLAY_TIME_MODES contains the three modes",
+          set(DISPLAY_TIME_MODES) == {"utc", "local", "market"},
+          f"got {DISPLAY_TIME_MODES}")
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:

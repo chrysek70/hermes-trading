@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from . import STATE_DIR, load_yaml, log
+from . import STATE_DIR, load_yaml, log, set_display_time_mode
 from . import loop as worker_loop
 from . import multi_loop as multi_loop_mod
 
@@ -44,7 +44,27 @@ def main() -> None:
         action="store_true",
         help="extra debug fields in per-tick output (e.g. RSI in SuperTrend mode).",
     )
+    parser.add_argument(
+        "--utc-time", "--bot-time", "--transaction-time",
+        dest="utc_time",
+        action="store_true",
+        help="show tick / log timestamps in UTC (e.g. '02:39:01'). The "
+             "default is the host OS local timezone (e.g. '22:39:01 EDT') "
+             "because interactive monitoring is the primary use case. "
+             "Aliases: --utc-time / --bot-time / --transaction-time — "
+             "all do the same thing. Persisted artifacts (heartbeat, "
+             "trades, positions) are always UTC regardless of this flag.",
+    )
     args = parser.parse_args()
+
+    # Issue #22: presentation-only. Default is host local timezone;
+    # --utc-time / --bot-time flips terminal output to UTC. Persisted
+    # artifacts (heartbeat, trades, positions, reports) stay UTC
+    # unconditionally.
+    if args.utc_time:
+        set_display_time_mode("utc")
+    else:
+        set_display_time_mode("local")
 
     if args.config:
         log(f"starting multi-asset worker from {args.config}")

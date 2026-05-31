@@ -102,6 +102,29 @@ uv run python -m hermes_trading.run \
     --config state/live_multiasset_long_short_funding.yaml --verbose
 ```
 
+#### Display timezone (Issue #22)
+
+By default the worker prints tick lines in the **host OS local timezone** with a tz abbreviation (e.g. `22:51:44 EDT`). Pass any of `--utc-time` / `--bot-time` / `--transaction-time` to force UTC instead (e.g. `02:51:44`).
+
+```bash
+# Default — host local time:
+uv run python -m hermes_trading.run --config state/live_multiasset.yaml
+
+# Force UTC display (useful for cross-machine debugging):
+uv run python -m hermes_trading.run \
+    --config state/live_multiasset.yaml --utc-time
+# (--bot-time and --transaction-time are aliases for the same thing.)
+
+# Combined with verbose:
+uv run python -m hermes_trading.run \
+    --config state/live_multiasset_long_short_funding.yaml --verbose
+```
+
+**Persisted artifacts always remain UTC** regardless of the display
+flag — `state/heartbeat.json`, `state/trades.jsonl`, `state/positions/`,
+research reports, decay-monitor output, every backtest result. The
+display setting is presentation only.
+
 Reads `state/live_multiasset.yaml` (assets list, timeframe,
 `max_open_positions`, shared strategy yaml). Maintains one position
 per asset in `state/positions/<KEY>.json`, writes a portfolio-level
