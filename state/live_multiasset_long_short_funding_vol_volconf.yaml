@@ -1,0 +1,69 @@
+# Multi-asset live (paper) config — adopted long-short + funding-filter
+# candidate (Issues #20 / #21) PLUS opt-in vol_sizing overlay (Issues #27
+# / #33) PLUS opt-in volume confirmation entry filter (Issues #35 / #38).
+#
+# This config is OPT-IN. It does NOT replace
+# state/live_multiasset_long_short_funding.yaml or
+# state/live_multiasset_long_short_funding_vol.yaml (both left
+# untouched). Switch to this config explicitly:
+#
+#     uv run python -m hermes_trading.run \
+#         --config state/live_multiasset_long_short_funding_vol_volconf.yaml \
+#         --verbose
+#
+# Fall back at any time:
+#
+#     uv run python -m hermes_trading.run \
+#         --config state/live_multiasset_long_short_funding_vol.yaml --verbose
+#     uv run python -m hermes_trading.run \
+#         --config state/live_multiasset_long_short_funding.yaml --verbose
+#
+# Locked parameters (from Issues #20, #21, #27, #33, #35, #38). DO NOT
+# tune without a new experiment + adoption gate.
+
+assets:
+  - BTC/USDT
+  - ETH/USDT
+
+timeframe: 4h
+poll_seconds: 10
+indicator_limit: 300
+max_open_positions: 2
+
+strategy: state/strategy_supertrend_long_short.yaml
+
+size_per_asset: 0.5
+circuit_break_after: 5
+heartbeat_schema: "multiasset-v4"   # bumped — adds volume_confirmation fields
+
+# Funding hard gate (Issues #20 / #21). Direction-aware.
+funding_filter:
+  enabled: true
+  block_long_above_pct: 95.0
+  block_short_below_pct: 5.0
+  percentile_window_bars: 180
+  on_missing_data: fail_open
+
+# Vol-quartile sizing overlay (Issues #27 / #33). Multiplicative on top of
+# size_per_asset. Funding stays a hard gate; vol_sizing only reduces.
+vol_sizing:
+  enabled: true
+  window_bars: 24
+  train_months: 12
+  mult_low: 1.00
+  mult_mid: 0.50
+  mult_high: 0.25
+
+# Volume confirmation entry filter (Issues #35 / #38). HARD entry gate
+# alongside funding. Direction-agnostic. Require signal-bar volume to be
+# at or above the 20-bar rolling mean. Fail-open during warmup.
+#
+# Composition (locked):
+#   entry_allowed = SuperTrend_signal AND funding_allow AND volume_allow
+#   final_size    = base_size * vol_multiplier
+#
+# Volume confirmation does NOT scale size — it only allows or blocks the
+# entry. Vol_sizing remains the only sizing modulator.
+volume_confirmation:
+  enabled: true
+  window_bars: 20

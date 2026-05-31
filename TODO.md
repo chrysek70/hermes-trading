@@ -5,6 +5,19 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Volume confirmation overlay wired opt-in to live (Issue #38).
+  `LiveVolumeConfirmationOverlay` in `multi_loop.py` mirrors the
+  existing funding/vol overlays; new yaml
+  `state/live_multiasset_long_short_funding_vol_volconf.yaml` is the
+  opt-in path. Three existing live yamls unchanged. Hard entry gate
+  composed AFTER funding: `entry = SuperTrend AND funding_allow AND
+  volume_allow`; vol_sizing remains sizing-only. Heartbeat + trade
+  rows + verbose line + replay all match the live worker.
+  3-month replay smoke test: 6→4 trades, DD 9.61% → 6.04% → **3.85%**
+  vs the no-vol baseline. 323/323 multi-asset self-tests pass
+  (was 280; +43 from Section 18). `signals.py` unchanged. No
+  automatic default switchover.
+
 - ✓ Volume confirmation filter for SuperTrend entries (Issue #35) —
   research. New runner `scripts/run_volume_confirmation.py` plus
   shared support module `scripts/_supertrend_overlay_lab.py` test

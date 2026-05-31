@@ -387,6 +387,177 @@ class LiveVolSizingOverlay:
                     "train_n": 0}
 
 
+# ---------- volume confirmation overlay (Issue #38) -------------------------
+
+# Locked Issue #35 volume-confirmation parameters. DO NOT tune without a new
+# experiment + adoption gate.
+VOLUME_CONF_WINDOW_BARS_DEFAULT = 20            # 20 completed 4h bars
+
+# Decision strings (kept stable as on-disk artifact for heartbeat + trade row).
+VOLUME_CONF_ALLOW = "allow"
+VOLUME_CONF_BLOCK_LOW = "block_low_volume_flip"
+VOLUME_CONF_WARMUP = "warmup"
+
+
+def evaluate_volume_confirmation_gate(
+    signal_volume: float | None,
+    volume_mean_20: float | None,
+) -> dict:
+    """Pure-function direction-agnostic volume confirmation gate.
+
+    Returns a dict with:
+      allow:    bool — True means entry may proceed
+      decision: str — VOLUME_CONF_ALLOW / VOLUME_CONF_BLOCK_LOW / VOLUME_CONF_WARMUP
+      reason:   str — short human-readable explanation
+      ratio:    float | None — signal_volume / volume_mean_20 (None when warmup)
+
+    Issue #35 rule: signal-bar volume must be >= rolling mean. Insufficient
+    history -> fail open (allow) with a warmup decision label.
+    """
+    if signal_volume is None or volume_mean_20 is None:
+        return {"allow": True, "decision": VOLUME_CONF_WARMUP,
+                "reason": "insufficient history; fail-open",
+                "ratio": None}
+    try:
+        sv = float(signal_volume)
+        vm = float(volume_mean_20)
+    except (TypeError, ValueError):
+        return {"allow": True, "decision": VOLUME_CONF_WARMUP,
+                "reason": "non-numeric volume input; fail-open",
+                "ratio": None}
+    if vm <= 0:
+        return {"allow": True, "decision": VOLUME_CONF_WARMUP,
+                "reason": "zero / negative rolling mean; fail-open",
+                "ratio": None}
+    ratio = sv / vm
+    if sv >= vm:
+        return {"allow": True, "decision": VOLUME_CONF_ALLOW,
+                "reason": f"signal volume {sv:.2f} >= mean20 {vm:.2f}",
+                "ratio": ratio}
+    return {"allow": False, "decision": VOLUME_CONF_BLOCK_LOW,
+            "reason": f"signal volume {sv:.2f} < mean20 {vm:.2f}",
+            "ratio": ratio}
+
+
+class LiveVolumeConfirmationOverlay:
+    """Per-asset volume-confirmation entry filter (Issue #38).
+
+    Loads enough 4h close + volume history at boot to populate a 20-bar
+    rolling mean of volume with a comfortable warmup margin. For each
+    per-tick lookup, returns:
+
+        available, signal_volume, volume_mean_20, volume_ratio,
+        decision, reason
+
+    ``decision`` is one of:
+        - "allow"                   — signal-bar volume >= rolling mean
+        - "block_low_volume_flip"   — signal-bar volume <  rolling mean
+        - "warmup"                  — insufficient history or non-numeric;
+                                      fail-open (entry permitted)
+
+    No future leakage by construction:
+      - the rolling mean at the queried timestamp uses only bars <= ts
+      - signal-bar volume is read from the closed signal bar
+        (caller passes ``signal_row["ts"]`` — Issue #24 semantics)
+
+    Fail-open by design: a loader failure or warmup never blocks the
+    strategy, it just emits a "warmup" decision label.
+    """
+
+    def __init__(self,
+                 assets: list[str],
+                 timeframe: str = "4h",
+                 window_bars: int = VOLUME_CONF_WINDOW_BARS_DEFAULT,
+                 load_history_months: int = 6):
+        from . import data as data_mod  # local import to avoid pulling
+                                        # ccxt at module import time
+        self.assets = list(assets)
+        self.timeframe = timeframe
+        self.window_bars = int(window_bars)
+        self.volume: dict[str, "pd.Series | None"] = {}
+        self.volume_mean: dict[str, "pd.Series | None"] = {}
+        for asset in assets:
+            sym = asset.replace("/", "")
+            try:
+                df = data_mod.resample(
+                    data_mod.load_klines(sym, n_months=load_history_months),
+                    timeframe,
+                )
+                vol_series = df["volume"]
+                mean_series = vol_series.rolling(
+                    self.window_bars,
+                    min_periods=self.window_bars,
+                ).mean()
+                self.volume[asset] = vol_series
+                self.volume_mean[asset] = mean_series
+                non_na = mean_series.dropna()
+                if non_na.empty:
+                    log(f"  volume_confirmation overlay loaded for {asset}: "
+                        f"{len(vol_series)} bars but no full mean-20 window "
+                        f"yet (will fail open)")
+                else:
+                    log(f"  volume_confirmation overlay loaded for {asset}: "
+                        f"{len(vol_series)} bars, {len(non_na)} mean-20 obs, "
+                        f"span {vol_series.index[0].date()} -> "
+                        f"{vol_series.index[-1].date()}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"[yellow]volume_confirmation overlay unavailable for "
+                    f"{asset}: {exc}; gate will fail open[/yellow]")
+                self.volume[asset] = None
+                self.volume_mean[asset] = None
+
+    def state_at(self, asset: str, ts) -> dict:
+        """Per-tick lookup. Returns a dict with keys:
+            available, signal_volume, volume_mean_20, volume_ratio,
+            decision, reason.
+
+        ``available=False`` means warmup / loader failure — caller treats
+        decision as allow (fail-open).
+        """
+        vol = self.volume.get(asset)
+        mean = self.volume_mean.get(asset)
+        if vol is None or mean is None:
+            gate = evaluate_volume_confirmation_gate(None, None)
+            return {"available": False,
+                    "signal_volume": None,
+                    "volume_mean_20": None,
+                    "volume_ratio": None,
+                    "decision": gate["decision"],
+                    "reason": gate["reason"]}
+        try:
+            ts_pd = pd.Timestamp(ts)
+            if ts_pd.tzinfo is None:
+                ts_pd = ts_pd.tz_localize("UTC")
+            vol_window = vol.loc[:ts_pd]
+            mean_window = mean.loc[:ts_pd]
+            if vol_window.empty:
+                gate = evaluate_volume_confirmation_gate(None, None)
+                return {"available": False, "signal_volume": None,
+                        "volume_mean_20": None, "volume_ratio": None,
+                        "decision": gate["decision"], "reason": gate["reason"]}
+            sv_val = vol_window.iloc[-1]
+            sv = float(sv_val) if not pd.isna(sv_val) else None
+            vm_val = (mean_window.iloc[-1]
+                      if not mean_window.empty else None)
+            vm = (float(vm_val)
+                  if vm_val is not None and not pd.isna(vm_val) else None)
+            gate = evaluate_volume_confirmation_gate(sv, vm)
+            return {
+                "available": (sv is not None and vm is not None),
+                "signal_volume": sv,
+                "volume_mean_20": vm,
+                "volume_ratio": gate["ratio"],
+                "decision": gate["decision"],
+                "reason": gate["reason"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            log(f"[yellow]volume_confirmation lookup failed for {asset}: "
+                f"{exc}; gate failing open[/yellow]")
+            return {"available": False, "signal_volume": None,
+                    "volume_mean_20": None, "volume_ratio": None,
+                    "decision": VOLUME_CONF_WARMUP, "reason": f"lookup error: {exc}"}
+
+
 # ---------- pure helpers (used by both run loop and self-test) --------------
 
 def build_trade_row(
@@ -642,6 +813,25 @@ async def run(
     else:
         log(f"  vol_sizing disabled")
 
+    # Issue #38 — volume_confirmation entry filter (opt-in). Disabled by
+    # default. Locked Issue #35 parameters; do NOT tune. Hard entry gate
+    # alongside funding; never affects exits or sizing.
+    vol_conf_cfg = (cfg.get("volume_confirmation") or {})
+    volume_confirmation_enabled = bool(vol_conf_cfg.get("enabled", False))
+    volume_conf_window_bars = int(vol_conf_cfg.get(
+        "window_bars", VOLUME_CONF_WINDOW_BARS_DEFAULT))
+    volume_overlay: LiveVolumeConfirmationOverlay | None = None
+    if volume_confirmation_enabled:
+        log(f"  volume_confirmation ENABLED  "
+            f"window_bars={volume_conf_window_bars}  "
+            f"(Issue #35 rule: signal-bar volume >= rolling mean)")
+        volume_overlay = LiveVolumeConfirmationOverlay(
+            assets, timeframe=timeframe,
+            window_bars=volume_conf_window_bars,
+        )
+    else:
+        log(f"  volume_confirmation disabled")
+
     log(f"Booting hermes-trading MULTI-ASSET paper worker")
     log(f"  assets={assets}  timeframe={timeframe}  max_open={max_open}")
     log(f"  strategy={strategy_path}  size_per_asset={size_per_asset}")
@@ -779,7 +969,18 @@ async def run(
                                 if vol_state is not None
                                 else 1.0)
 
+            # Issue #38 — volume_confirmation per-bar lookup. Keyed by the
+            # SIGNAL bar (Issue #24 closed-bar semantics). Decision is a
+            # hard gate alongside funding; vol_sizing remains multiplicative.
+            volume_conf_state = None
+            if volume_overlay is not None:
+                volume_conf_state = volume_overlay.state_at(
+                    asset, signal_row.get("ts"))
+
             funding_block_message: str | None = None
+            # Issue #38 — separate per-asset variable so the block message
+            # for volume confirmation never collides with the funding one.
+            volume_conf_block_message: str | None = None
 
             if position is None:
                 allowed, gate_reason = can_enter(asset, positions_state, max_open)
@@ -810,6 +1011,28 @@ async def run(
                                 opened = True
                         else:
                             opened = True
+                        # Issue #38 — volume_confirmation hard gate (long).
+                        # Composes AFTER funding: funding decides whether the
+                        # direction is permitted; volume confirms the flip-bar
+                        # has real participation. Fail-open during warmup.
+                        if opened and volume_overlay is not None:
+                            v_gate = evaluate_volume_confirmation_gate(
+                                volume_conf_state.get("signal_volume")
+                                    if volume_conf_state else None,
+                                volume_conf_state.get("volume_mean_20")
+                                    if volume_conf_state else None,
+                            )
+                            if not v_gate["allow"]:
+                                opened = False
+                                volume_conf_block_message = (
+                                    f"volume_confirmation low_volume_flip "
+                                    f"({v_gate['reason']})"
+                                )
+                                log(f"[yellow]BLOCK long {asset} @ {last_price:.2f} "
+                                    f"(volume_confirmation: {v_gate['reason']})[/yellow]")
+                            elif v_gate["decision"] == VOLUME_CONF_WARMUP:
+                                log(f"[yellow]volume_confirmation warmup for "
+                                    f"{asset}; long allowed by fail-open policy[/yellow]")
                         if opened:
                             # Issue #29: live entry fill matches the research
                             # convention — close + adverse slippage.
@@ -846,6 +1069,19 @@ async def run(
                                     vol_state.get("q50") if vol_state else None),
                                 "vol_q3_at_entry": (
                                     vol_state.get("q75") if vol_state else None),
+                                # Issue #38 — volume_confirmation context locked at entry
+                                "signal_volume_at_entry": (
+                                    volume_conf_state.get("signal_volume")
+                                    if volume_conf_state else None),
+                                "volume_mean_20_at_entry": (
+                                    volume_conf_state.get("volume_mean_20")
+                                    if volume_conf_state else None),
+                                "volume_ratio_at_entry": (
+                                    volume_conf_state.get("volume_ratio")
+                                    if volume_conf_state else None),
+                                "volume_confirmation_decision_at_entry": (
+                                    volume_conf_state.get("decision")
+                                    if volume_conf_state else None),
                             }
                             positions_state[asset] = new_pos
                             positions.save_position(asset, new_pos, state_dir)
@@ -878,6 +1114,25 @@ async def run(
                                 elif gate["decision"] == "missing_data":
                                     log(f"[yellow]funding data missing for {asset}; "
                                         f"short allowed by fail-open policy[/yellow]")
+                            # Issue #38 — volume_confirmation hard gate (short)
+                            if short_ok and volume_overlay is not None:
+                                v_gate = evaluate_volume_confirmation_gate(
+                                    volume_conf_state.get("signal_volume")
+                                        if volume_conf_state else None,
+                                    volume_conf_state.get("volume_mean_20")
+                                        if volume_conf_state else None,
+                                )
+                                if not v_gate["allow"]:
+                                    short_ok = False
+                                    volume_conf_block_message = (
+                                        f"volume_confirmation low_volume_flip "
+                                        f"({v_gate['reason']})"
+                                    )
+                                    log(f"[yellow]BLOCK short {asset} @ {last_price:.2f} "
+                                        f"(volume_confirmation: {v_gate['reason']})[/yellow]")
+                                elif v_gate["decision"] == VOLUME_CONF_WARMUP:
+                                    log(f"[yellow]volume_confirmation warmup for "
+                                        f"{asset}; short allowed by fail-open policy[/yellow]")
                             if short_ok:
                                 # Issue #29: short entry fill = close − adverse
                                 # slippage, mirroring backtest._run_state_machine.
@@ -911,6 +1166,19 @@ async def run(
                                         vol_state.get("q50") if vol_state else None),
                                     "vol_q3_at_entry": (
                                         vol_state.get("q75") if vol_state else None),
+                                    # Issue #38 — volume_confirmation context
+                                    "signal_volume_at_entry": (
+                                        volume_conf_state.get("signal_volume")
+                                        if volume_conf_state else None),
+                                    "volume_mean_20_at_entry": (
+                                        volume_conf_state.get("volume_mean_20")
+                                        if volume_conf_state else None),
+                                    "volume_ratio_at_entry": (
+                                        volume_conf_state.get("volume_ratio")
+                                        if volume_conf_state else None),
+                                    "volume_confirmation_decision_at_entry": (
+                                        volume_conf_state.get("decision")
+                                        if volume_conf_state else None),
                                 }
                                 positions_state[asset] = new_pos
                                 positions.save_position(asset, new_pos, state_dir)
@@ -980,6 +1248,14 @@ async def run(
                         trade["vol_q1"] = position.get("vol_q1_at_entry")
                         trade["vol_q2"] = position.get("vol_q2_at_entry")
                         trade["vol_q3"] = position.get("vol_q3_at_entry")
+                    # Issue #38 — volume_confirmation trade-row fields
+                    if "signal_volume_at_entry" in position:
+                        trade["volume_confirmation_enabled"] = volume_confirmation_enabled
+                        trade["signal_volume"] = position.get("signal_volume_at_entry")
+                        trade["volume_mean_20"] = position.get("volume_mean_20_at_entry")
+                        trade["volume_ratio"] = position.get("volume_ratio_at_entry")
+                        trade["volume_confirmation_decision"] = (
+                            position.get("volume_confirmation_decision_at_entry"))
                     append_jsonl(state_dir / "trades.jsonl", trade)
                     log(f"[cyan]EXIT {direction}[/cyan] {asset} @ {exit_fill:.2f} "
                         f"({reason}, return={trade['net_return_pct']:+.4f}, "
@@ -1066,6 +1342,16 @@ async def run(
                 asset_hb["vol_q1"] = vol_state.get("q25")
                 asset_hb["vol_q2"] = vol_state.get("q50")
                 asset_hb["vol_q3"] = vol_state.get("q75")
+            # Issue #38 — volume_confirmation heartbeat block. Keys match
+            # Issue #38 spec exactly.
+            asset_hb["volume_confirmation_enabled"] = volume_confirmation_enabled
+            if volume_overlay is not None and volume_conf_state is not None:
+                asset_hb["signal_volume"] = volume_conf_state.get("signal_volume")
+                asset_hb["volume_mean_20"] = volume_conf_state.get("volume_mean_20")
+                asset_hb["volume_ratio"] = volume_conf_state.get("volume_ratio")
+                asset_hb["volume_confirmation_decision"] = volume_conf_state.get("decision")
+                if not volume_conf_state.get("available"):
+                    asset_hb["volume_confirmation_warning"] = volume_conf_state.get("reason")
             per_asset_hb[asset] = asset_hb
             asset_row_for_display[asset] = {
                 "close": last_price,
@@ -1081,6 +1367,8 @@ async def run(
                 "funding_state": funding_state,
                 "funding_blocked_message": funding_block_message,
                 "vol_state": vol_state,   # Issue #33
+                "volume_conf_state": volume_conf_state,  # Issue #38
+                "volume_conf_blocked_message": volume_conf_block_message,
             }
 
         if assets and len(broken) == len(assets):
@@ -1175,6 +1463,19 @@ async def run(
                         else:
                             log(f"  vol: warmup or insufficient history; "
                                 f"fail-open mult=1.00")
+                    # Issue #38 — volume_confirmation verbose line
+                    if volume_overlay is not None:
+                        vcs = disp.get("volume_conf_state")
+                        if vcs is not None and vcs.get("available"):
+                            log(f"  volume: signal={vcs.get('signal_volume'):.2f} "
+                                f"mean20={vcs.get('volume_mean_20'):.2f} "
+                                f"ratio={vcs.get('volume_ratio'):.2f} "
+                                f"decision={vcs.get('decision')}")
+                        else:
+                            log(f"  volume: warmup or insufficient history; "
+                                f"fail-open decision=allow")
+                    if disp.get("volume_conf_blocked_message"):
+                        log(f"  blocked_by: {disp['volume_conf_blocked_message']}")
             log(f"portfolio open={open_count}/{max_open}  "
                 f"realized={realized_pnl_pct:+.3f}%  "
                 f"unrealized={unrl_portfolio*100:+.3f}%")

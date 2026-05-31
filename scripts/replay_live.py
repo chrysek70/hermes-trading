@@ -52,12 +52,18 @@ from hermes_trading import signals
 from hermes_trading.multi_loop import (
     LiveFundingOverlay,
     LiveVolSizingOverlay,
+    LiveVolumeConfirmationOverlay,
     VOL_SIZING_WINDOW_BARS_DEFAULT,
     VOL_SIZING_TRAIN_MONTHS_DEFAULT,
     VOL_SIZING_MULT_LOW_DEFAULT,
     VOL_SIZING_MULT_MID_DEFAULT,
     VOL_SIZING_MULT_HIGH_DEFAULT,
+    VOLUME_CONF_WINDOW_BARS_DEFAULT,
+    VOLUME_CONF_ALLOW,
+    VOLUME_CONF_BLOCK_LOW,
+    VOLUME_CONF_WARMUP,
     evaluate_funding_gate,
+    evaluate_volume_confirmation_gate,
     can_enter,
 )
 
@@ -321,6 +327,9 @@ TRADE_CSV_COLUMNS = [
     "base_size", "vol_multiplier", "final_size",
     "realized_vol_24", "vol_bucket",
     "vol_q1", "vol_q2", "vol_q3",
+    # Issue #38 volume_confirmation additions (None when disabled):
+    "volume_confirmation_enabled", "signal_volume", "volume_mean_20",
+    "volume_ratio", "volume_confirmation_decision",
 ]
 
 
@@ -415,6 +424,15 @@ def _run_config_replay(args: argparse.Namespace) -> int:
     vol_mult_high = float(vol_cfg.get("mult_high",
                                        VOL_SIZING_MULT_HIGH_DEFAULT))
 
+    # Issue #38 — volume_confirmation replay parity. Reads the SAME
+    # ``volume_confirmation:`` block the live worker reads. Disabled by
+    # default; the existing live yamls have no such block so replay
+    # behaviour is byte-for-byte unchanged for them.
+    vol_conf_cfg = cfg.get("volume_confirmation") or {}
+    volume_confirmation_enabled = bool(vol_conf_cfg.get("enabled"))
+    volume_conf_window_bars = int(vol_conf_cfg.get(
+        "window_bars", VOLUME_CONF_WINDOW_BARS_DEFAULT))
+
     print(f"{CYAN}{'='*70}{RESET}")
     print(f"{CYAN}REPLAY (multi-asset config mode) — {cfg_path.name}{RESET}")
     print(f"{CYAN}  assets={assets}  timeframe={timeframe}  "
@@ -432,6 +450,11 @@ def _run_config_replay(args: argparse.Namespace) -> int:
              f"train_months={vol_train_months}  "
              f"mult=({vol_mult_low}/{vol_mult_mid}/{vol_mult_high})"
              if vol_sizing_enabled else "")
+          + f"{RESET}")
+    print(f"{CYAN}  volume_confirmation="
+          f"{'ENABLED' if volume_confirmation_enabled else 'disabled'}"
+          + (f"  window_bars={volume_conf_window_bars}"
+             if volume_confirmation_enabled else "")
           + f"{RESET}")
     print()
 
@@ -463,6 +486,18 @@ def _run_config_replay(args: argparse.Namespace) -> int:
             # populated train window.
             load_history_months=max(args.n_months + vol_train_months + 3,
                                      vol_train_months + 3),
+        )
+
+    # ---- volume_confirmation overlay (Issue #38) — same class the live
+    # worker uses; no replay-specific math.
+    volume_overlay: LiveVolumeConfirmationOverlay | None = None
+    if volume_confirmation_enabled:
+        volume_overlay = LiveVolumeConfirmationOverlay(
+            assets, timeframe=timeframe,
+            window_bars=volume_conf_window_bars,
+            # Load a bit more than n_months so the earliest replay bar has
+            # a populated 20-bar rolling mean.
+            load_history_months=max(args.n_months + 2, 3),
         )
 
     # ---- timeline union (so BTC and ETH advance in lockstep) ----
@@ -523,9 +558,16 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                 if vol_state is not None
                                 else 1.0)
 
+            # Issue #38 — volume_confirmation per-bar lookup.
+            volume_conf_state = None
+            if volume_overlay is not None:
+                volume_conf_state = volume_overlay.state_at(
+                    asset, signal_row["ts"])
+
             exit_event: dict | None = None
             enter_event: dict | None = None
             funding_block_msg: str | None = None
+            volume_conf_block_msg: str | None = None
 
             # ----- exit logic (signal_row drives flip / time; display_row low/high
             #       drives intra-bar stop) -----
@@ -586,6 +628,13 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                         "vol_q1": position.get("vol_q1_at_entry"),
                         "vol_q2": position.get("vol_q2_at_entry"),
                         "vol_q3": position.get("vol_q3_at_entry"),
+                        # Issue #38 — volume_confirmation context locked at entry
+                        "volume_confirmation_enabled": volume_confirmation_enabled,
+                        "signal_volume": position.get("signal_volume_at_entry"),
+                        "volume_mean_20": position.get("volume_mean_20_at_entry"),
+                        "volume_ratio": position.get("volume_ratio_at_entry"),
+                        "volume_confirmation_decision":
+                            position.get("volume_confirmation_decision_at_entry"),
                     })
                     exit_event = {
                         "direction": direction,
@@ -622,6 +671,22 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                                      f"({gate['reason']})")
                         else:
                             opened = True
+                        # Issue #38 — volume_confirmation hard gate (long).
+                        # Applied after funding; vol_sizing remains sizing-only.
+                        volume_conf_decision = "n/a"
+                        if opened and volume_overlay is not None:
+                            v_gate = evaluate_volume_confirmation_gate(
+                                volume_conf_state.get("signal_volume")
+                                    if volume_conf_state else None,
+                                volume_conf_state.get("volume_mean_20")
+                                    if volume_conf_state else None,
+                            )
+                            volume_conf_decision = v_gate["decision"]
+                            if not v_gate["allow"]:
+                                opened = False
+                                volume_conf_block_msg = (
+                                    f"volume_confirmation low_volume_flip "
+                                    f"({v_gate['reason']})")
                         if opened:
                             entry_fill = last * (1 + args.slippage)
                             stop_val = float(
@@ -652,6 +717,18 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                     vol_state.get("q50") if vol_state else None),
                                 "vol_q3_at_entry": (
                                     vol_state.get("q75") if vol_state else None),
+                                # Issue #38 — volume_confirmation context
+                                "signal_volume_at_entry": (
+                                    volume_conf_state.get("signal_volume")
+                                    if volume_conf_state else None),
+                                "volume_mean_20_at_entry": (
+                                    volume_conf_state.get("volume_mean_20")
+                                    if volume_conf_state else None),
+                                "volume_ratio_at_entry": (
+                                    volume_conf_state.get("volume_ratio")
+                                    if volume_conf_state else None),
+                                "volume_confirmation_decision_at_entry":
+                                    volume_conf_decision,
                                 "funding_decision_at_entry": funding_decision,
                                 "funding_rate_at_entry": (
                                     funding_state.get("rate") if funding_state else None),
@@ -667,6 +744,7 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                 "funding_decision": funding_decision,
                                 "vol_mult": current_vol_mult,
                                 "final_size": final_size,
+                                "volume_conf_decision": volume_conf_decision,
                             }
                     if (not opened and positions_by_asset[asset] is None
                             and strategy.get("shorts", {}).get("enabled")):
@@ -688,6 +766,21 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                     funding_block_msg = (
                                         f"funding_filter {gate['decision']} "
                                         f"({gate['reason']})")
+                            # Issue #38 — volume_confirmation hard gate (short)
+                            volume_conf_decision_s = "n/a"
+                            if short_ok and volume_overlay is not None:
+                                v_gate = evaluate_volume_confirmation_gate(
+                                    volume_conf_state.get("signal_volume")
+                                        if volume_conf_state else None,
+                                    volume_conf_state.get("volume_mean_20")
+                                        if volume_conf_state else None,
+                                )
+                                volume_conf_decision_s = v_gate["decision"]
+                                if not v_gate["allow"]:
+                                    short_ok = False
+                                    volume_conf_block_msg = (
+                                        f"volume_confirmation low_volume_flip "
+                                        f"({v_gate['reason']})")
                             if short_ok:
                                 entry_fill = last * (1 - args.slippage)
                                 stop_val = float(
@@ -716,6 +809,18 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                         vol_state.get("q50") if vol_state else None),
                                     "vol_q3_at_entry": (
                                         vol_state.get("q75") if vol_state else None),
+                                    # Issue #38 — volume_confirmation context
+                                    "signal_volume_at_entry": (
+                                        volume_conf_state.get("signal_volume")
+                                        if volume_conf_state else None),
+                                    "volume_mean_20_at_entry": (
+                                        volume_conf_state.get("volume_mean_20")
+                                        if volume_conf_state else None),
+                                    "volume_ratio_at_entry": (
+                                        volume_conf_state.get("volume_ratio")
+                                        if volume_conf_state else None),
+                                    "volume_confirmation_decision_at_entry":
+                                        volume_conf_decision_s,
                                     "funding_decision_at_entry": funding_decision_s,
                                     "funding_rate_at_entry": (
                                         funding_state.get("rate") if funding_state else None),
@@ -731,6 +836,7 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                     "funding_decision": funding_decision_s,
                                     "vol_mult": current_vol_mult,
                                     "final_size": final_size,
+                                    "volume_conf_decision": volume_conf_decision_s,
                                 }
 
             # ----- per-asset display line -----
@@ -819,8 +925,25 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                         f"  vol {asset} warmup / insufficient history; "
                         f"fail-open mult=1.00"
                     )
+            # Issue #38 — volume_confirmation verbose line
+            if volume_overlay is not None and (state_changed or not args.quiet_flat):
+                vcs = volume_conf_state or {"available": False}
+                if vcs.get("available"):
+                    per_asset_lines.append(
+                        f"  volume {asset} signal={vcs.get('signal_volume'):.2f} "
+                        f"mean20={vcs.get('volume_mean_20'):.2f} "
+                        f"ratio={vcs.get('volume_ratio'):.2f} "
+                        f"decision={vcs.get('decision')}"
+                    )
+                else:
+                    per_asset_lines.append(
+                        f"  volume {asset} warmup / insufficient history; "
+                        f"fail-open decision=allow"
+                    )
             if funding_block_msg:
                 per_asset_lines.append(f"  blocked_by: {funding_block_msg}")
+            if volume_conf_block_msg:
+                per_asset_lines.append(f"  blocked_by: {volume_conf_block_msg}")
 
         # ---- portfolio status line (printed only when something happened) ----
         open_count = sum(1 for v in positions_by_asset.values() if v is not None)
@@ -898,6 +1021,13 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                 "vol_q1": cur_pos.get("vol_q1_at_entry"),
                 "vol_q2": cur_pos.get("vol_q2_at_entry"),
                 "vol_q3": cur_pos.get("vol_q3_at_entry"),
+                # Issue #38 — volume_confirmation context locked at entry
+                "volume_confirmation_enabled": volume_confirmation_enabled,
+                "signal_volume": cur_pos.get("signal_volume_at_entry"),
+                "volume_mean_20": cur_pos.get("volume_mean_20_at_entry"),
+                "volume_ratio": cur_pos.get("volume_ratio_at_entry"),
+                "volume_confirmation_decision":
+                    cur_pos.get("volume_confirmation_decision_at_entry"),
             })
             print(f"{GRAY}[{last_ts.strftime('%Y-%m-%d %H:%M')}]{RESET} "
                   f"{asset} {YELLOW}EXIT (end of data) "

@@ -57,6 +57,14 @@ grouped by layer so it's clear where each future experiment fits.
   No automatic default switchover — operator chooses when to point
   `--config` at the new yaml. Forward paper-test pending before any
   default switch.
+- Volume-confirmation entry filter — **shipped opt-in live (Issue
+  #38) on top of vol_sizing.** Issue #35 research: PF 4.53 → 5.79,
+  DD −34%, trade count preserved (123 → 104). Hard entry gate
+  alongside funding; vol_sizing remains sizing-only. Locked rule:
+  signal-bar volume must be ≥ 20-bar rolling mean. Available via
+  `state/live_multiasset_long_short_funding_vol_volconf.yaml`;
+  three existing live yamls left untouched. No automatic default
+  switchover.
 - Volatility targeting (continuous, per-asset by realised vol →
   smoother equity curve). The Issue #27 quartile mapping is
   discrete; a continuous version is an obvious follow-up.

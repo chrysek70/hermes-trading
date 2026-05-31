@@ -512,6 +512,88 @@ Outputs:
 Tests: 21 new checks in Section 15 of
 `scripts/test_multiasset_worker.py`. 260/260 pass.
 
+## Volume confirmation overlay wired opt-in to live (Issue #38) — shipped
+
+After Issue #35 research (PF 4.53 → 5.79, DD 2.02% → 1.34%, trade
+count 123 → 104, return preserved) and the now-shipped Issue #34
+replay parity, volume confirmation is available in live paper mode
+as an OPT-IN additive on a new yaml
+`state/live_multiasset_long_short_funding_vol_volconf.yaml`. The
+three existing live yamls remain untouched.
+
+Implementation:
+- `LiveVolumeConfirmationOverlay` class in
+  `hermes_trading/multi_loop.py` mirrors `LiveFundingOverlay` /
+  `LiveVolSizingOverlay`. Loads ~6 months of 4h close + volume per
+  asset at boot; per-tick lookup keyed on the signal bar timestamp
+  (Issue #24 closed-bar semantics). Computes rolling 20-bar mean
+  volume strictly causally; returns `decision` =
+  `"allow"` / `"block_low_volume_flip"` / `"warmup"`. Fail-open by
+  design — never blocks during warmup or loader failure.
+- Pure `evaluate_volume_confirmation_gate(signal_volume,
+  volume_mean_20)` helper (matches the `LiveFundingOverlay` style)
+  encapsulates the gate decision and is reused by both live and
+  replay.
+- `multi_loop.run()` composes the gate AFTER the funding gate at
+  both long and short entries: `entry_allowed = SuperTrend AND
+  funding_allow AND volume_allow`. Vol_sizing remains
+  multiplicative-only — the volume gate does not change `size`,
+  only whether the entry fires.
+- Trade rows gain `volume_confirmation_enabled`, `signal_volume`,
+  `volume_mean_20`, `volume_ratio`, `volume_confirmation_decision`
+  (Issue #38 spec field names).
+- Heartbeat gains the same per-asset block plus a
+  `volume_confirmation_warning` field when the overlay is in
+  warmup or insufficient-history state. Bumped heartbeat schema
+  to `multiasset-v4`.
+- Verbose tick output adds: `volume: signal=… mean20=… ratio=…
+  decision=…`. Block events emit `blocked_by:
+  volume_confirmation low_volume_flip (...)`.
+
+Replay parity (Issue #38 spec item 8): `scripts/replay_live.py`
+applies the same overlay with the same hard-gate semantics. Replay
+boot now logs `volume_confirmation=ENABLED window_bars=20` when the
+config enables it. Trade-output CSV appends the 5 volume_*
+fields after the original 12 Issue #26 columns plus the 8 Issue
+#34 vol fields (preserving backward compat).
+
+Smoke test on the same 3-month replay window that flagged the
+recent regime:
+
+| config | trades | return | DD |
+|---|---:|---:|---:|
+| `funding.yaml` (no vol) | 6 | -9.61% | 9.61% |
+| `funding_vol.yaml` (Issue #34) | 6 | -6.04% | 6.04% |
+| `funding_vol_volconf.yaml` (Issue #38) | **4** | **-3.85%** | **3.85%** |
+
+Same alpha layer; volume confirmation pruned 2 of 6 chop flips at
+entry. DD ~60% smaller than the original baseline; ~36% smaller
+than vol_sizing alone.
+
+Tests: Section 18 of `scripts/test_multiasset_worker.py` adds 43
+new checks covering locked defaults, pure gate function, overlay
+state_at on synthetic series (high-vol / low-vol / boundary /
+warmup / insufficient history), new yaml schema, existing yamls
+unchanged (regression), live source-level wiring (overlay
+instantiation, gate after funding, trade row carriage, heartbeat
+block, verbose line), signal-row keying (no future leak), funding
+and vol_sizing independence, replay parity (import surface, gate
+at both directions, CSV columns appended after the Issue #26 +
+Issue #34 prefixes, verbose line). 323/323 multi-asset checks
+pass (was 280). 14/14 decay-monitor checks pass. `py_compile
+hermes_trading/*.py scripts/*.py` clean. Legacy `--strategy`
+replay path bit-for-bit identical. Replay of the existing vol_sizing
+yaml unchanged (no behaviour drift for already-shipped paths).
+
+`signals.py`, `state/strategy_supertrend_long_short.yaml`, and all
+three existing live yamls
+(`state/live_multiasset.yaml`,
+`state/live_multiasset_long_short_funding.yaml`,
+`state/live_multiasset_long_short_funding_vol.yaml`) unchanged.
+
+No automatic default switchover. Operator points `--config` at the
+new yaml when ready.
+
 ## Replay vol_sizing parity (Issue #34) — shipped
 
 Bug fix: `scripts/replay_live.py --config state/live_multiasset_long_short_funding_vol.yaml`

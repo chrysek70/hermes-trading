@@ -358,6 +358,65 @@ on this universe). PF and DD both improve marginally on the parallel
 portfolio. Not a primary strategy. See
 `research/funding_rate_filter_report.md`.
 
+## Volume confirmation overlay — opt-in live (Issue #38)
+
+After Issue #35 (research: PF 4.53 → 5.79, DD −34%, trade count
+preserved) and Issue #29 (live fill parity), the volume confirmation
+filter is wired into live paper mode as an **opt-in additive** on a
+new yaml. The existing vol_sizing yaml remains unchanged as a
+control.
+
+Run the **current vol_sizing candidate** (no volume gate):
+
+```bash
+uv run python -m hermes_trading.run \
+    --config state/live_multiasset_long_short_funding_vol.yaml --verbose
+```
+
+Run the **new volume-confirmed candidate** (opt-in):
+
+```bash
+uv run python -m hermes_trading.run \
+    --config state/live_multiasset_long_short_funding_vol_volconf.yaml --verbose
+```
+
+Replay the same config:
+
+```bash
+uv run python scripts/replay_live.py \
+    --config state/live_multiasset_long_short_funding_vol_volconf.yaml \
+    --n-months 24 --bars-per-second 50 --quiet-flat
+```
+
+The volume gate composes with the existing layers:
+
+```
+entry_allowed = SuperTrend_signal AND funding_allow AND volume_allow
+final_size    = base_size × vol_multiplier
+```
+
+Volume confirmation is a hard entry gate (block low-volume flips);
+vol_sizing remains the only sizing modulator. The rule (locked from
+Issue #35): require signal-bar volume to be at or above the 20-bar
+rolling mean. Fail-open during indicator warmup.
+
+Verbose adds:
+
+```
+  volume: signal=12345.67 mean20=10000.00 ratio=1.23 decision=allow
+```
+
+When blocked:
+
+```
+  blocked_by: volume_confirmation low_volume_flip (...)
+```
+
+Closed-trade rows on `state/trades.jsonl` gain
+`volume_confirmation_enabled`, `signal_volume`, `volume_mean_20`,
+`volume_ratio`, `volume_confirmation_decision`. Heartbeat carries the
+same per-asset block. Decay-monitor schema preserved.
+
 ## Vol-sizing overlay — opt-in live (Issue #33)
 
 After Issues #27 (research) and #29 (live fill parity) closed, the

@@ -1903,6 +1903,193 @@ def main() -> int:
           "vol_sizing" not in base_cfg_17)
     print()
 
+    # --- 18. Volume confirmation live + replay parity (Issue #38)
+    print("18. Volume confirmation live overlay (Issue #38)")
+    from hermes_trading.multi_loop import (
+        VOLUME_CONF_WINDOW_BARS_DEFAULT,
+        VOLUME_CONF_ALLOW,
+        VOLUME_CONF_BLOCK_LOW,
+        VOLUME_CONF_WARMUP,
+        evaluate_volume_confirmation_gate,
+        LiveVolumeConfirmationOverlay,
+    )
+
+    # 18.0 Locked default matches Issue #35 spec
+    check("VOLUME_CONF_WINDOW_BARS_DEFAULT == 20",
+          VOLUME_CONF_WINDOW_BARS_DEFAULT == 20)
+    check("decision strings stable",
+          VOLUME_CONF_ALLOW == "allow"
+          and VOLUME_CONF_BLOCK_LOW == "block_low_volume_flip"
+          and VOLUME_CONF_WARMUP == "warmup")
+
+    # 18.1 Pure gate function — allow / block / warmup
+    g_allow = evaluate_volume_confirmation_gate(15000.0, 10000.0)
+    check("volume >= mean20 -> allow + ratio reported",
+          g_allow["allow"] is True
+          and g_allow["decision"] == "allow"
+          and abs(g_allow["ratio"] - 1.5) < 1e-12,
+          f"got {g_allow}")
+    g_eq = evaluate_volume_confirmation_gate(10000.0, 10000.0)
+    check("volume == mean20 -> allow (boundary inclusive)",
+          g_eq["allow"] is True and g_eq["decision"] == "allow")
+    g_block = evaluate_volume_confirmation_gate(8000.0, 10000.0)
+    check("volume < mean20 -> block_low_volume_flip",
+          g_block["allow"] is False
+          and g_block["decision"] == "block_low_volume_flip"
+          and abs(g_block["ratio"] - 0.8) < 1e-12,
+          f"got {g_block}")
+    g_warm_none = evaluate_volume_confirmation_gate(None, 10000.0)
+    check("None signal volume -> fail-open warmup",
+          g_warm_none["allow"] is True
+          and g_warm_none["decision"] == "warmup")
+    g_warm_mean_none = evaluate_volume_confirmation_gate(10000.0, None)
+    check("None mean20 -> fail-open warmup",
+          g_warm_mean_none["allow"] is True
+          and g_warm_mean_none["decision"] == "warmup")
+    g_warm_zero = evaluate_volume_confirmation_gate(10000.0, 0.0)
+    check("zero mean20 -> fail-open warmup (no /0)",
+          g_warm_zero["allow"] is True
+          and g_warm_zero["decision"] == "warmup")
+
+    # 18.2 Overlay with synthetic series — exercises state_at without disk/network
+    import pandas as _pd_18
+    overlay_18 = LiveVolumeConfirmationOverlay.__new__(LiveVolumeConfirmationOverlay)
+    overlay_18.assets = ["BTC/USDT"]
+    overlay_18.timeframe = "4h"
+    overlay_18.window_bars = 20
+    # Synthetic 50-bar volume series; rolling mean precomputed
+    idx_18 = _pd_18.date_range("2026-01-01", periods=50, freq="4h", tz="UTC")
+    vol_series_18 = _pd_18.Series([1000.0] * 50, index=idx_18, dtype=float)
+    vol_series_18.iloc[-1] = 1500.0  # last bar exceeds mean
+    mean_series_18 = vol_series_18.rolling(20, min_periods=20).mean()
+    overlay_18.volume = {"BTC/USDT": vol_series_18}
+    overlay_18.volume_mean = {"BTC/USDT": mean_series_18}
+    s_allow = overlay_18.state_at("BTC/USDT", idx_18[-1])
+    check("overlay state_at: high-volume bar -> allow",
+          s_allow["available"] is True
+          and s_allow["decision"] == "allow"
+          and abs(s_allow["signal_volume"] - 1500.0) < 1e-9
+          and abs(s_allow["volume_mean_20"] - 1025.0) < 1e-9,
+          f"got {s_allow}")
+    vol_series_18.iloc[-1] = 800.0    # below mean
+    overlay_18.volume = {"BTC/USDT": vol_series_18}
+    overlay_18.volume_mean = {"BTC/USDT": vol_series_18.rolling(20, min_periods=20).mean()}
+    s_block = overlay_18.state_at("BTC/USDT", idx_18[-1])
+    check("overlay state_at: low-volume bar -> block_low_volume_flip",
+          s_block["available"] is True
+          and s_block["decision"] == "block_low_volume_flip",
+          f"got {s_block}")
+    # Insufficient history: only 10 bars -> all NaN means, fail-open
+    short_idx_18 = _pd_18.date_range("2026-01-01", periods=10, freq="4h", tz="UTC")
+    overlay_18.volume = {"BTC/USDT": _pd_18.Series([1000.0]*10, index=short_idx_18, dtype=float)}
+    overlay_18.volume_mean = {"BTC/USDT": _pd_18.Series([1000.0]*10, index=short_idx_18, dtype=float).rolling(20, min_periods=20).mean()}
+    s_warm = overlay_18.state_at("BTC/USDT", short_idx_18[-1])
+    check("insufficient history (10 bars < 20) -> warmup + allow",
+          s_warm["available"] is False
+          and s_warm["decision"] == "warmup",
+          f"got {s_warm}")
+
+    # 18.3 New opt-in yaml has volume_confirmation.enabled True
+    vconf_cfg_path_18 = ROOT / "state" / "live_multiasset_long_short_funding_vol_volconf.yaml"
+    check("opt-in vol_volconf yaml exists", vconf_cfg_path_18.exists())
+    vconf_cfg_18 = yaml.safe_load(open(vconf_cfg_path_18))
+    check("vol_volconf yaml: assets == [BTC/USDT, ETH/USDT]",
+          vconf_cfg_18["assets"] == ["BTC/USDT", "ETH/USDT"])
+    check("vol_volconf yaml: strategy == long_short SuperTrend",
+          vconf_cfg_18["strategy"] == "state/strategy_supertrend_long_short.yaml")
+    check("vol_volconf yaml: funding_filter still enabled",
+          vconf_cfg_18["funding_filter"]["enabled"] is True)
+    check("vol_volconf yaml: vol_sizing still enabled",
+          vconf_cfg_18["vol_sizing"]["enabled"] is True)
+    check("vol_volconf yaml: volume_confirmation enabled (opt-in active)",
+          vconf_cfg_18["volume_confirmation"]["enabled"] is True)
+    check("vol_volconf yaml: volume_confirmation window_bars == 20",
+          vconf_cfg_18["volume_confirmation"]["window_bars"] == 20)
+
+    # 18.4 Existing yamls UNCHANGED — no volume_confirmation block
+    for old_yaml in ("live_multiasset.yaml",
+                     "live_multiasset_long_short_funding.yaml",
+                     "live_multiasset_long_short_funding_vol.yaml"):
+        old_cfg = yaml.safe_load(open(ROOT / "state" / old_yaml))
+        check(f"existing yaml unchanged: {old_yaml} has NO volume_confirmation",
+              "volume_confirmation" not in old_cfg,
+              f"unexpected vol_conf block in {old_yaml}")
+
+    # 18.5 Live worker source-level wiring
+    multi_src_18 = (ROOT / "hermes_trading" / "multi_loop.py").read_text()
+    check("multi_loop instantiates LiveVolumeConfirmationOverlay when enabled",
+          "volume_overlay = LiveVolumeConfirmationOverlay(" in multi_src_18)
+    check("multi_loop reads volume_confirmation.enabled from cfg",
+          'cfg.get("volume_confirmation")' in multi_src_18
+          and 'vol_conf_cfg.get("enabled"' in multi_src_18)
+    check("multi_loop calls volume_overlay.state_at on signal_row[ts]",
+          'volume_overlay.state_at(' in multi_src_18
+          and 'signal_row.get("ts"))' in multi_src_18)
+    check("multi_loop applies volume_confirmation gate AFTER funding (long)",
+          "Issue #38 — volume_confirmation hard gate (long)" in multi_src_18)
+    check("multi_loop applies volume_confirmation gate AFTER funding (short)",
+          "Issue #38 — volume_confirmation hard gate (short)" in multi_src_18)
+    check("multi_loop carries volume fields onto trade row",
+          'trade["signal_volume"] = position.get("signal_volume_at_entry")' in multi_src_18
+          and 'trade["volume_confirmation_decision"]' in multi_src_18)
+    check("multi_loop adds volume_confirmation_enabled to heartbeat",
+          'asset_hb["volume_confirmation_enabled"] = volume_confirmation_enabled' in multi_src_18)
+    check("multi_loop heartbeat populates signal_volume / mean / ratio / decision",
+          'asset_hb["signal_volume"]' in multi_src_18
+          and 'asset_hb["volume_mean_20"]' in multi_src_18
+          and 'asset_hb["volume_ratio"]' in multi_src_18
+          and 'asset_hb["volume_confirmation_decision"]' in multi_src_18)
+    check("multi_loop verbose volume line emits the spec format",
+          '"  volume: signal=' in multi_src_18
+          and "ratio=" in multi_src_18 and "decision=" in multi_src_18)
+
+    # 18.6 Volume gate uses the SIGNAL row, not the DISPLAY row
+    check("multi_loop volume_confirmation uses signal_row timestamp",
+          'volume_overlay.state_at(\n                    asset, signal_row.get("ts"))' in multi_src_18
+          or 'volume_overlay.state_at(asset, signal_row.get("ts"))' in multi_src_18)
+
+    # 18.7 Funding and vol_sizing remain independent (regression — must
+    # still be present after the new gate insertion)
+    check("funding gate evaluate_funding_gate(\"long\", …) still present",
+          'evaluate_funding_gate(\n                                "long"' in multi_src_18)
+    check("vol_sizing multiplier still applied at long entry",
+          "size_per_asset * current_vol_mult" in multi_src_18)
+
+    # 18.8 Replay parity — replay imports + wires the volume overlay
+    replay_path_18 = ROOT / "scripts" / "replay_live.py"
+    replay_src_18 = replay_path_18.read_text()
+    check("replay imports LiveVolumeConfirmationOverlay",
+          "LiveVolumeConfirmationOverlay" in replay_src_18)
+    check("replay reads volume_confirmation block from cfg",
+          'cfg.get("volume_confirmation")' in replay_src_18)
+    check("replay instantiates volume_overlay when enabled",
+          "volume_overlay = LiveVolumeConfirmationOverlay(" in replay_src_18)
+    check("replay logs volume_confirmation=ENABLED on boot",
+          "volume_confirmation=" in replay_src_18
+          and "ENABLED' if volume_confirmation_enabled" in replay_src_18)
+    check("replay calls volume_overlay.state_at on signal_row[ts]",
+          'volume_overlay.state_at(\n                    asset, signal_row["ts"])' in replay_src_18
+          or 'volume_overlay.state_at(asset, signal_row["ts"])' in replay_src_18)
+    check("replay applies volume gate (long)",
+          "Issue #38 — volume_confirmation hard gate (long)" in replay_src_18)
+    check("replay applies volume gate (short)",
+          "Issue #38 — volume_confirmation hard gate (short)" in replay_src_18)
+    check("replay TRADE_CSV_COLUMNS appends volume fields",
+          "volume_confirmation_enabled" in replay_src_18
+          and "signal_volume" in replay_src_18
+          and "volume_mean_20" in replay_src_18
+          and "volume_ratio" in replay_src_18
+          and "volume_confirmation_decision" in replay_src_18)
+    check("replay TRADE_CSV_COLUMNS preserves Issue #26 prefix (first 12)",
+          replay_mod_17.TRADE_CSV_COLUMNS[:12] == [
+              "asset", "direction", "entry_time", "exit_time",
+              "entry_price", "exit_price", "return_pct", "net_return_pct",
+              "setup", "exit_reason", "bars_held", "funding_decision",
+          ])
+    check("replay emits verbose volume line",
+          '"  volume {asset} signal=' in replay_src_18)
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:
