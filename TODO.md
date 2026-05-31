@@ -5,6 +5,49 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Volume confirmation filter for SuperTrend entries (Issue #35) —
+  research. New runner `scripts/run_volume_confirmation.py` plus
+  shared support module `scripts/_supertrend_overlay_lab.py` test
+  `volume_at_signal_bar >= volume.rolling(20).mean()` as a
+  runner-level entry filter on top of the adopted live candidate
+  (`state/live_multiasset_long_short_funding_vol.yaml`). 48mo
+  walk-forward OOS: 123 → 104 trades (-15%), return +73.34% →
+  +74.67% (preserved), DD 2.02% → 1.34% (-34%), PF 4.53 → 5.79,
+  win 58.5% → 62.5%. Passes the ROADMAP adoption gate and the
+  Issue-#35 adoption question. Reports / CSVs:
+  `research/volume_confirmation_report.md`,
+  `results/volume_confirmation_comparison_<ts>.{csv,md}`,
+  `results/trades_volume_confirmation_<ts>.csv`. `signals.py`,
+  `multi_loop.py`, `loop.py`, `run.py`, every `state/*.yaml`
+  unchanged. py_compile clean. 280/280 multi-asset self-tests
+  pass. Decay-monitor self-test passes. Not adopted live —
+  recommendation is operator-controlled live wiring as the
+  next Issue-#33-style opt-in step.
+- ✓ ADX trend-strength gate for SuperTrend entries (Issue #36) —
+  research. New runner `scripts/run_adx_gate.py` (ADX(14) inline,
+  Wilder's smoothed construction). Same baseline; same locked
+  vol_sizing + funding; same fold geometry. 48mo walk-forward OOS:
+  123 → 63 trades (-49%), return +73.34% → +35.32% (-52%), DD
+  2.02% → 1.21% (-40%), PF 4.53 → 4.62 (marginal), win 58.5% →
+  57.1%. **Rejected** — over-filters; SuperTrend flip already
+  captures trend strength so ADX 20 is redundant. Reports / CSVs:
+  `research/adx_gate_report.md`,
+  `results/adx_gate_comparison_<ts>.{csv,md}`,
+  `results/trades_adx_gate_<ts>.csv`. `signals.py` and live
+  configs unchanged.
+- ✓ Body-to-range confirmation for SuperTrend entries (Issue #37) —
+  research. New runner `scripts/run_body_range_confirmation.py`.
+  Rule: `abs(close-open)/max(high-low,eps) >= 0.50` plus
+  direction-consistent body sign. 48mo walk-forward OOS: 123 → 104
+  trades (-15%), return +73.34% → +67.68% (-7.7%), DD 2.02% →
+  1.33% (-34%), PF 4.53 → 5.54, win 58.5% → 61.5%. Passes the
+  ROADMAP adoption gate and the Issue-#37 adoption question;
+  second-tier live wiring candidate behind volume confirmation.
+  Reports / CSVs: `research/body_range_confirmation_report.md`,
+  `results/body_range_confirmation_comparison_<ts>.{csv,md}`,
+  `results/trades_body_range_confirmation_<ts>.csv`. `signals.py`
+  and live configs unchanged.
+
 - ✓ Replay vol_sizing parity (Issue #34). `scripts/replay_live.py`
   now applies the `LiveVolSizingOverlay` from `multi_loop.py` when
   the config has `vol_sizing.enabled: true` — closing a parity gap

@@ -1246,6 +1246,129 @@ New research scripts (read-only):
 clean. Test trio (multi-asset worker + decay monitor self-test +
 py_compile) passes.
 
+## Volume confirmation filter (Issue #35) — research
+
+Tested a single entry-filter overlay on top of the adopted live
+candidate (`state/live_multiasset_long_short_funding_vol.yaml`):
+``volume_at_signal_bar >= volume.rolling(20).mean()`` on the
+SuperTrend flip bar. Same rule applied to long and short. Locked
+threshold; no tuning. Filter applies at the runner level
+(`scripts/run_volume_confirmation.py`); `signals.py` and the live
+worker untouched.
+
+48-month walk-forward OOS, BTC + ETH 4h, train=1440 / test=360 /
+embargo=6, fee=0.001/side, slippage=0.0005, vol_sizing on with the
+locked Q1/Q2-Q3/Q4 ladder and trailing 12-month quartile lookup.
+
+| variant | trades | OOS return | max DD | PF | win% | stop% | mean mult |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `baseline_funding_vol` | 123 | +73.34% | 2.02% | 4.53 | 58.5% | 94.3% | 0.551 |
+| `+ volume_conf` | 104 | +74.67% | 1.34% | 5.79 | 62.5% | 94.2% | 0.550 |
+
+Recent 3mo: 10 → 5 trades, +3.57% → +3.43%, PF 2.87 → 5.64, DD
+1.52% → 0.74%. Recent 6mo: 23 → 15 trades, return preserved
+(+12.30% → +12.31%), PF 5.84 → 11.89.
+
+Verdict: **YES on the adoption question**. The filter removes 19
+of 123 trades (15.4%); preserves total return at +74.67% (Δ
++1.33pp); cuts DD by 0.68pp; lifts PF from 4.53 to 5.79; lifts
+win-rate by 4 pp. All filtered-out windows reduce risk; none
+materially reduce return. Passes the ROADMAP adoption gate
+(PF > 1.69 AND trades >= 30).
+
+Files:
+`scripts/run_volume_confirmation.py`,
+`scripts/_supertrend_overlay_lab.py`,
+`research/volume_confirmation_report.md`,
+`results/volume_confirmation_comparison_<ts>.{csv,md}`,
+`results/trades_volume_confirmation_<ts>.csv`.
+
+## ADX trend-strength gate (Issue #36) — research
+
+Tested ``ADX(14) >= 20`` as an entry gate on the same adopted
+candidate. ADX implemented inline in `scripts/run_adx_gate.py`
+(Wilder's smoothed True Range + DI±, alpha=1/14). Same threshold
+applied to long and short. Locked; no tuning.
+
+| variant | trades | OOS return | max DD | PF | win% | stop% | mean mult |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `baseline_funding_vol` | 123 | +73.34% | 2.02% | 4.53 | 58.5% | 94.3% | 0.551 |
+| `+ adx` | 63 | +35.32% | 1.21% | 4.62 | 57.1% | 92.1% | 0.504 |
+
+Recent 12mo: 37 → 18 trades, +22.05% → +12.28%, PF 6.15 → 5.60
+(lower!). Recent 3mo: 10 → 8 trades, +3.57% → +3.14%.
+
+Verdict: **NO on the adoption question**. ADX(14)>=20 prunes
+60/123 trades (-48.8%) — almost half the strategy is filtered out.
+PF moves marginally (4.53 → 4.62, +0.09) but absolute return
+collapses (-38.02pp, -51.8%) and ret/exp halves (+133.14% →
++70.08%). The core edge is NOT preserved; the SuperTrend flip
+itself already captures the trend strength signal ADX is
+attempting to measure, so ADX is redundant and over-restrictive
+at the standard 20 threshold. Passes the bare ROADMAP gate
+(PF > 1.69, trades >= 30), but fails Issue #36's
+"preserving the core edge" half of the adoption question.
+
+Files:
+`scripts/run_adx_gate.py`,
+`research/adx_gate_report.md`,
+`results/adx_gate_comparison_<ts>.{csv,md}`,
+`results/trades_adx_gate_<ts>.csv`.
+
+## Body-to-range confirmation (Issue #37) — research
+
+Tested a candle-quality entry filter: at the signal bar require
+``abs(close-open) / max(high-low, 1e-12) >= 0.50`` AND
+direction-consistent body sign (long: close>open; short: close<open).
+Locked; no tuning.
+
+| variant | trades | OOS return | max DD | PF | win% | stop% | mean mult |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `baseline_funding_vol` | 123 | +73.34% | 2.02% | 4.53 | 58.5% | 94.3% | 0.551 |
+| `+ body_range` | 104 | +67.68% | 1.33% | 5.54 | 61.5% | 94.2% | 0.550 |
+
+Recent 12mo: 37 → 32 trades, +22.05% → +23.40%, PF 6.15 → 9.05.
+Recent 3mo: 10 → 9 trades, +3.57% → +3.78%, PF 2.87 → 3.19.
+
+Verdict: **YES on the adoption question**. The filter removes 19
+of 123 trades (15.4%); gives up 5.65pp of total return (-7.7%);
+cuts DD by 0.69pp (-34%); lifts PF from 4.53 to 5.54; lifts
+win-rate by 3 pp. The trim is concentrated in 48mo (-5.65pp); on
+all recent windows return is preserved or improved. Passes the
+ROADMAP adoption gate (PF > 1.69 AND trades >= 30) and the spec's
+"without over-filtering the strategy" check.
+
+Files:
+`scripts/run_body_range_confirmation.py`,
+`research/body_range_confirmation_report.md`,
+`results/body_range_confirmation_comparison_<ts>.{csv,md}`,
+`results/trades_body_range_confirmation_<ts>.csv`.
+
+Common methodology notes for Issues #35 / #36 / #37:
+
+- All three runners share `scripts/_supertrend_overlay_lab.py`,
+  a private support module that implements the walk-forward
+  parallel coordinator, the vol_sizing overlay (Issue #27 / #33
+  trailing-12mo quartile lookup matching `LiveVolSizingOverlay`),
+  and the funding hard gate (Issue #20 / #21).
+- The baseline numbers above (123 trades, +73.34%, DD 2.02%, PF
+  4.53) differ from the Issue #27 `run_adaptive_sizing.py`
+  numbers (123 trades, +72.71%, DD 2.10%, PF 4.63) because this
+  runner uses the LIVE worker's trailing-12mo quartile lookup
+  rather than the per-fold-train-slice variant. Trade count and
+  signal universe are identical; only the per-bar multiplier
+  assignment differs slightly because the quartile boundaries
+  are computed over a 12-month rolling window vs the 7.6-month
+  per-fold-train window. This choice keeps the baseline
+  directly comparable to the operator's live config
+  (`state/live_multiasset_long_short_funding_vol.yaml`).
+- All three filters share the same 48-month span, same
+  fees/slippage, same fold geometry, and same Issue #29 fill
+  model. No yaml writes; no live worker changes; `signals.py`
+  unchanged.
+- `py_compile`, `scripts/test_multiasset_worker.py`, and
+  `scripts/monitor_strategy_decay.py --self-test` all pass.
+
 ## Recommended next experiment
 
 The diminishing-returns pattern across Issues #5-#7 still holds —

@@ -16,6 +16,28 @@ grouped by layer so it's clear where each future experiment fits.
   exit; alternative trailing rule).
 - Volatility-compression breakout setup (Phase-3 audit flagged the
   `med-low` ATR bucket at PF 2.84 on the v2 strategy).
+- Volume confirmation entry filter — **tested on long-short +
+  funding + vol_sizing in Issue #35.** Rule:
+  `volume_at_signal_bar >= volume.rolling(20).mean()` (locked).
+  48mo OOS: trades 123 → 104 (-15%), return +73.34% → +74.67%
+  (preserved), DD 2.02% → 1.34% (-34%), PF 4.53 → 5.79, win 58.5%
+  → 62.5%. Passes the adoption gate; recommended as the next
+  Issue-#33-style opt-in live wiring candidate (user-controlled).
+  Not yet adopted live.
+- ADX(14) ≥ 20 trend-strength gate — **tested on long-short +
+  funding + vol_sizing in Issue #36.** 48mo OOS: trades 123 → 63
+  (-49%), return +73.34% → +35.32% (-52%), DD 2.02% → 1.21%, PF
+  4.53 → 4.62. **Rejected** — over-filters; the SuperTrend flip
+  already captures trend strength and the standard ADX 20 threshold
+  is redundant. Not adopted; not in any live config.
+- Body-to-range candle-quality filter — **tested on long-short +
+  funding + vol_sizing in Issue #37.** Rule:
+  `abs(close-open)/max(high-low,eps) >= 0.50` plus direction-consistent
+  body sign (locked). 48mo OOS: trades 123 → 104 (-15%), return
+  +73.34% → +67.68% (-7.7%), DD 2.02% → 1.33% (-34%), PF 4.53 →
+  5.54, win 58.5% → 61.5%. Passes the adoption gate; second-tier
+  live wiring candidate behind volume confirmation. Not yet adopted
+  live.
 - Factor-style crypto features: momentum, carry, basis.
 - Cointegration / pairs research if the universe grows beyond
   BTC + ETH.
