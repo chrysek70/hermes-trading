@@ -182,6 +182,167 @@ def format_rsi_tick(
 
 # ---------- heartbeat fields ------------------------------------------------
 
+# ---------- "why no trade" diagnostics (Issue #18) --------------------------
+
+#: Default distance below the SuperTrend line at which the asset is considered
+#: "near a potential entry". Configurable per call. -1.0 = within 1% below the
+#: line.
+DEFAULT_NEAR_ENTRY_THRESHOLD_PCT = -1.0
+
+
+def _safe_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def diagnose_entry_blockers(
+    row: dict,
+    strategy: dict,
+    position: dict | None,
+    portfolio_open: int = 0,
+    max_open: int = 1,
+    near_entry_threshold_pct: float = DEFAULT_NEAR_ENTRY_THRESHOLD_PCT,
+) -> dict:
+    """Pure-function diagnostic. Returns a dict describing why an entry is
+    or isn't blocked on the current bar.
+
+    Keys returned:
+        in_position        : bool — asset already holds
+        bullish_regime_ok  : bool — EMA50 > EMA200
+        st_dir             : 'UP' / 'DOWN' / '?'
+        st_dir_prev        : 'UP' / 'DOWN' / '?'
+        st_flip_ok         : bool — prev=DOWN, current=UP (a fresh UP flip)
+        distance_pct       : float — (close - line) / line * 100 (signed)
+        portfolio_cap_reached : bool
+        blockers           : list[str] — short labels for what's blocking
+        waiting_for        : str — human-readable description of entry rule
+        near_entry         : str | None — present when close is near the band
+        blocked_by         : str | None — populated when ALL signal conditions
+                             pass but the portfolio cap stops the entry
+    """
+    out: dict = {
+        "in_position": position is not None,
+        "blockers": [],
+        "waiting_for": None,
+        "near_entry": None,
+        "blocked_by": None,
+    }
+
+    close = _safe_float(row.get("close"))
+    ema_fast = _safe_float(row.get("ema_fast"))
+    ema_slow = _safe_float(row.get("ema_slow"))
+    st_line = _safe_float(row.get("supertrend_line"))
+    cur_dir = row.get("supertrend_direction")
+    prev_dir = row.get("supertrend_direction_prev")
+
+    out["st_dir"] = _direction_str(cur_dir)
+    out["st_dir_prev"] = _direction_str(prev_dir)
+    bullish_regime_ok = ema_fast is not None and ema_slow is not None and ema_fast > ema_slow
+    out["bullish_regime_ok"] = bool(bullish_regime_ok)
+
+    # SuperTrend "flip up" requires the previous bar to have been DOWN and
+    # the current bar to be UP. We test both.
+    try:
+        st_flip_ok = (
+            cur_dir is not None and prev_dir is not None
+            and int(cur_dir) == 1 and int(prev_dir) == -1
+        )
+    except (TypeError, ValueError):
+        st_flip_ok = False
+    out["st_flip_ok"] = bool(st_flip_ok)
+
+    dist_pct = None
+    if close is not None and st_line is not None and st_line > 0:
+        dist_pct = (close - st_line) / st_line * 100.0
+    out["distance_pct"] = dist_pct
+
+    portfolio_cap_reached = portfolio_open >= max_open
+    out["portfolio_cap_reached"] = bool(portfolio_cap_reached)
+
+    setups = strategy.get("setups") or {}
+    supertrend_enabled = bool((setups.get("supertrend") or {}).get("enabled"))
+    out["supertrend_enabled"] = supertrend_enabled
+
+    if out["in_position"]:
+        # An existing position is not "blocked from entry"; describe what
+        # the worker is now waiting for instead.
+        if supertrend_enabled:
+            out["waiting_for"] = "SuperTrend flip DOWN (exit) or stop hit"
+        else:
+            out["waiting_for"] = "strategy-defined exit rule"
+        return out
+
+    # Flat — work out which entry-rule conditions are blocking.
+    if supertrend_enabled:
+        out["waiting_for"] = "SuperTrend flip UP + EMA50 > EMA200"
+
+        if out["st_dir"] != "UP":
+            out["blockers"].append(f"supertrend_direction={out['st_dir']}")
+        if dist_pct is not None and dist_pct < 0:
+            out["blockers"].append(
+                f"close below supertrend_line by {abs(dist_pct):.2f}%"
+            )
+        if not st_flip_ok and out["st_dir"] == "UP":
+            # Already in UP regime; we don't fire again until the next
+            # DOWN→UP transition.
+            out["blockers"].append("no fresh DOWN→UP flip this bar")
+        if not bullish_regime_ok:
+            out["blockers"].append("ema50_below_ema200")
+
+        # "Near entry": close is within the configured pct of the band,
+        # currently below it (typical setup before a flip).
+        if (dist_pct is not None
+                and dist_pct < 0
+                and dist_pct >= near_entry_threshold_pct):
+            out["near_entry"] = (
+                f"needs +{abs(dist_pct):.2f}% close above SuperTrend line on "
+                f"completed 4h bar"
+            )
+
+        # "blocked_by portfolio cap" only fires when entry conditions are
+        # actually met — otherwise the cap isn't the relevant blocker.
+        if st_flip_ok and bullish_regime_ok and portfolio_cap_reached:
+            out["blocked_by"] = "portfolio max_open_positions reached"
+
+    else:
+        # Legacy v2 long-short: produce a useful waiting_for + blocker list
+        # so the verbose mode is informative there too. Brief because the
+        # primary target of this feature is the SuperTrend live deployment.
+        out["waiting_for"] = "RSI / breakout / pullback signal"
+        if not bullish_regime_ok:
+            out["blockers"].append("ema50_below_ema200")
+        if portfolio_cap_reached:
+            out["blockers"].append("portfolio max_open_positions reached")
+
+    return out
+
+
+def format_entry_diagnostic_lines(diag: dict) -> list[str]:
+    """Render the diagnostic dict into 1–3 indented lines suitable for the
+    log. Returns an empty list if there is nothing to show (e.g. asset is
+    already in a position and has no waiting_for)."""
+    lines: list[str] = []
+    if diag.get("waiting_for"):
+        lines.append(f"  waiting_for: {diag['waiting_for']}")
+    blockers = diag.get("blockers") or []
+    if blockers:
+        lines.append("  blockers: " + ", ".join(blockers))
+    if diag.get("near_entry"):
+        lines.append(f"  near_entry: {diag['near_entry']}")
+    if diag.get("blocked_by"):
+        lines.append(f"  blocked_by: {diag['blocked_by']}")
+    return lines
+
+
 def supertrend_heartbeat_fields(
     close: float | None,
     supertrend_direction: Any,

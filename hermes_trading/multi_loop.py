@@ -369,13 +369,29 @@ async def run(
                 row.get("supertrend_direction"),
                 row.get("supertrend_line"),
             ))
+            # Issue #18: lightweight bullish-regime flag for dashboards
+            ef = row.get("ema_fast")
+            es = row.get("ema_slow")
+            try:
+                bullish_regime_ok = (
+                    ef is not None and es is not None
+                    and not pd.isna(ef) and not pd.isna(es)
+                    and float(ef) > float(es)
+                )
+            except (TypeError, ValueError):
+                bullish_regime_ok = None
+            asset_hb["bullish_regime"] = bullish_regime_ok
             per_asset_hb[asset] = asset_hb
             asset_row_for_display[asset] = {
                 "close": last_price,
                 "rsi": rsi_val,
                 "supertrend_direction": row.get("supertrend_direction"),
+                "supertrend_direction_prev": row.get("supertrend_direction_prev"),
                 "supertrend_line": row.get("supertrend_line"),
+                "ema_fast": ef,
+                "ema_slow": es,
                 "position": cur_pos,
+                "raw_row": row,
             }
 
         if assets and len(broken) == len(assets):
@@ -404,8 +420,8 @@ async def run(
         # ---- per-tick output ----
         if st_mode:
             # SuperTrend mode: one line per asset showing SuperTrend
-            # status (Issue #17). Portfolio summary follows so the
-            # operator still sees aggregate state at a glance.
+            # status (Issue #17). When --verbose, each flat asset gets
+            # additional "why no trade" diagnostic lines (Issue #18).
             for a in assets:
                 disp = asset_row_for_display.get(a)
                 if disp is None:
@@ -420,6 +436,16 @@ async def run(
                     rsi=disp.get("rsi"),
                     verbose=verbose,
                 ))
+                if verbose:
+                    diag = display_mod.diagnose_entry_blockers(
+                        row=disp["raw_row"],
+                        strategy=strategy,
+                        position=disp["position"],
+                        portfolio_open=open_count,
+                        max_open=max_open,
+                    )
+                    for line in display_mod.format_entry_diagnostic_lines(diag):
+                        log(line)
             log(f"portfolio open={open_count}/{max_open}  "
                 f"realized={realized_pnl_pct:+.3f}%  "
                 f"unrealized={unrl_portfolio*100:+.3f}%")

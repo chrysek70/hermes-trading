@@ -360,6 +360,17 @@ async def run(asset: str, verbose: bool = False) -> None:
                 row.get("supertrend_direction"),
                 row.get("supertrend_line"),
             ))
+            # Issue #18: small bullish-regime flag for dashboards.
+            ef = row.get("ema_fast")
+            es = row.get("ema_slow")
+            try:
+                heartbeat["bullish_regime"] = (
+                    ef is not None and es is not None
+                    and not pd.isna(ef) and not pd.isna(es)
+                    and float(ef) > float(es)
+                )
+            except (TypeError, ValueError):
+                heartbeat["bullish_regime"] = None
             write_json(STATE_DIR / "heartbeat.json", heartbeat)
 
             # ---- per-tick log line (Issue #17: auto-detect display) ----
@@ -374,6 +385,18 @@ async def run(asset: str, verbose: bool = False) -> None:
                     rsi=rsi_val,
                     verbose=verbose,
                 ))
+                # Issue #18: verbose "why no trade" diagnostic. Only
+                # emitted in verbose mode; never in default output.
+                if verbose:
+                    diag = display_mod.diagnose_entry_blockers(
+                        row=row,
+                        strategy=strategy,
+                        position=position,
+                        portfolio_open=1 if position is not None else 0,
+                        max_open=1,
+                    )
+                    for line in display_mod.format_entry_diagnostic_lines(diag):
+                        log(line)
             else:
                 # legacy v2 RSI display preserved verbatim — including
                 # color tags and the regime suffix.

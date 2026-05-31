@@ -128,11 +128,24 @@ tick ETH/USDT close=3901.20 st=UP line=3720.00 dist=+4.87% v=v3-supertrend-01 po
 portfolio open=1/2  realized=+0.000%  unrealized=+0.601%
 ```
 
-Add `--verbose` to append RSI back into the SuperTrend tick line for debugging:
+Add `--verbose` to append RSI back into the SuperTrend tick line **and** print "why no trade" diagnostics per asset (Issue #18):
 
 ```bash
 uv run python -m hermes_trading.run --config state/live_multiasset.yaml --verbose
 ```
+
+Sample verbose output:
+
+```
+tick BTC/USDT close=74097.90 st=DOWN line=75559.66 dist=-1.93% v=v3-supertrend-01 pos=flat rsi=47.0
+  waiting_for: SuperTrend flip UP + EMA50 > EMA200
+  blockers: supertrend_direction=DOWN, close below supertrend_line by 1.93%, ema50_below_ema200
+tick ETH/USDT close=2030.23 st=DOWN line=2076.91 dist=-2.25% v=v3-supertrend-01 pos=flat rsi=48.5
+  waiting_for: SuperTrend flip UP + EMA50 > EMA200
+  blockers: supertrend_direction=DOWN, close below supertrend_line by 2.25%
+```
+
+When the close is within ~1% of the SuperTrend line, a `near_entry:` line shows the exact gap. When all entry conditions are satisfied but the portfolio cap is full, a `blocked_by: portfolio max_open_positions reached` line appears instead. Default (non-verbose) output is unchanged.
 
 ## Current best out-of-sample result
 

@@ -354,6 +354,129 @@ def main() -> int:
           f"got {hb_warm}")
     print()
 
+    # --- 9. "Why no trade" diagnostic (Issue #18)
+    print("9. 'Why no trade' diagnostic (Issue #18)")
+    from hermes_trading.display import (
+        diagnose_entry_blockers, format_entry_diagnostic_lines,
+    )
+
+    st_strat = {"setups": {"supertrend": {"enabled": True},
+                           "pullback": {"enabled": False},
+                           "breakout": {"enabled": False}},
+                "shorts": {"enabled": False}}
+    v2_strat = {"setups": {"pullback": {"enabled": True},
+                           "breakout": {"enabled": True}}}
+
+    # Case A: DOWN regime, below band, EMA bearish — every blocker fires.
+    row_down_bearish = {
+        "close": 74097.90,
+        "supertrend_direction": -1,
+        "supertrend_direction_prev": -1,
+        "supertrend_line": 75559.66,
+        "ema_fast": 73500.0,
+        "ema_slow": 75000.0,
+    }
+    diag = diagnose_entry_blockers(row_down_bearish, st_strat, position=None,
+                                   portfolio_open=0, max_open=2)
+    check("waiting_for set to SuperTrend rule",
+          diag["waiting_for"] == "SuperTrend flip UP + EMA50 > EMA200")
+    check("blockers include supertrend_direction=DOWN",
+          any("supertrend_direction=DOWN" in b for b in diag["blockers"]),
+          f"got {diag['blockers']}")
+    check("blockers include close-below-line with %",
+          any("close below supertrend_line by 1.93%" in b for b in diag["blockers"]),
+          f"got {diag['blockers']}")
+    check("blockers include ema50_below_ema200",
+          "ema50_below_ema200" in diag["blockers"], f"got {diag['blockers']}")
+    check("near_entry absent when distance > 1% below",
+          diag["near_entry"] is None, f"got {diag['near_entry']}")
+    check("blocked_by absent when conditions not met",
+          diag["blocked_by"] is None)
+
+    # Case B: still DOWN but only just below the band (-0.42%) → near_entry fires.
+    row_near = dict(row_down_bearish)
+    row_near["close"] = 75559.66 * (1 - 0.0042)
+    row_near["ema_fast"] = 76000.0   # regime now bullish
+    diag_near = diagnose_entry_blockers(row_near, st_strat, position=None,
+                                        portfolio_open=0, max_open=2)
+    check("near_entry message contains gap %",
+          diag_near["near_entry"] is not None
+          and "0.42%" in diag_near["near_entry"],
+          f"got {diag_near.get('near_entry')}")
+    check("ema50_below_ema200 NOT in blockers when bullish",
+          "ema50_below_ema200" not in diag_near["blockers"])
+
+    # Case C: fresh UP flip + bullish regime + portfolio cap reached →
+    # entry conditions satisfied but cap is the blocker.
+    row_flip = {
+        "close": 76000.0,
+        "supertrend_direction": 1,
+        "supertrend_direction_prev": -1,
+        "supertrend_line": 75500.0,
+        "ema_fast": 76000.0,
+        "ema_slow": 75000.0,
+    }
+    diag_cap = diagnose_entry_blockers(row_flip, st_strat, position=None,
+                                       portfolio_open=2, max_open=2)
+    check("blocked_by portfolio cap when entry conditions met",
+          diag_cap["blocked_by"] == "portfolio max_open_positions reached",
+          f"got {diag_cap['blocked_by']}")
+    check("st_flip_ok is True on DOWN→UP transition",
+          diag_cap["st_flip_ok"] is True)
+    check("bullish_regime_ok is True when EMA fast > slow",
+          diag_cap["bullish_regime_ok"] is True)
+
+    # Case D: already in position → describe what we're waiting to exit.
+    diag_in = diagnose_entry_blockers(
+        row_flip, st_strat,
+        position={"entry_price": 75600, "direction": "long", "setup": "supertrend"},
+        portfolio_open=1, max_open=2,
+    )
+    check("in_position description mentions exit/flip DOWN",
+          diag_in["in_position"] is True
+          and "flip DOWN" in (diag_in["waiting_for"] or ""),
+          f"got {diag_in.get('waiting_for')}")
+    check("no blockers list for an existing position",
+          diag_in["blockers"] == [], f"got {diag_in['blockers']}")
+
+    # Case E: v2 long-short legacy strategy → diagnostic still works,
+    #         waiting_for points at the RSI/breakout rules.
+    diag_v2 = diagnose_entry_blockers(row_down_bearish, v2_strat, position=None,
+                                      portfolio_open=0, max_open=1)
+    check("v2 strategy waiting_for mentions RSI/breakout/pullback",
+          "RSI" in (diag_v2["waiting_for"] or ""),
+          f"got {diag_v2.get('waiting_for')}")
+
+    # Case F: warmup row (None direction / None line) → diagnostic does
+    #         not crash and st_dir reports '?'.
+    row_warm = {"close": 100.0, "supertrend_direction": None,
+                "supertrend_direction_prev": None, "supertrend_line": None,
+                "ema_fast": None, "ema_slow": None}
+    diag_warm = diagnose_entry_blockers(row_warm, st_strat, position=None)
+    check("warmup row gives st_dir='?'",
+          diag_warm["st_dir"] == "?", f"got {diag_warm['st_dir']}")
+    check("warmup row gives distance_pct None",
+          diag_warm["distance_pct"] is None,
+          f"got {diag_warm['distance_pct']}")
+
+    # Formatter — produces the expected indented lines
+    lines = format_entry_diagnostic_lines(diag)
+    check("formatter emits waiting_for line",
+          any(line.startswith("  waiting_for: ") for line in lines),
+          f"got {lines}")
+    check("formatter emits blockers line",
+          any(line.startswith("  blockers: ") for line in lines),
+          f"got {lines}")
+    lines_cap = format_entry_diagnostic_lines(diag_cap)
+    check("formatter emits blocked_by line for cap case",
+          any(line.startswith("  blocked_by: ") for line in lines_cap),
+          f"got {lines_cap}")
+    lines_in = format_entry_diagnostic_lines(diag_in)
+    check("formatter omits blockers when no blockers present",
+          all(not line.startswith("  blockers: ") for line in lines_in),
+          f"got {lines_in}")
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:
