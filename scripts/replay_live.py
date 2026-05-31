@@ -51,6 +51,12 @@ from hermes_trading import display as display_mod
 from hermes_trading import signals
 from hermes_trading.multi_loop import (
     LiveFundingOverlay,
+    LiveVolSizingOverlay,
+    VOL_SIZING_WINDOW_BARS_DEFAULT,
+    VOL_SIZING_TRAIN_MONTHS_DEFAULT,
+    VOL_SIZING_MULT_LOW_DEFAULT,
+    VOL_SIZING_MULT_MID_DEFAULT,
+    VOL_SIZING_MULT_HIGH_DEFAULT,
     evaluate_funding_gate,
     can_enter,
 )
@@ -303,12 +309,18 @@ def _run_strategy_replay(args: argparse.Namespace) -> int:
 
 # ---------- new --config mode (Issue #26) -------------------------------------
 
-# Trade-CSV columns are the exact spec from Issue #26 — DO NOT rename
-# without updating the issue and any external consumers.
+# Trade-CSV columns: the original Issue #26 spec PLUS the Issue #34
+# vol_sizing fields appended at the end so existing consumers reading the
+# first 12 columns remain compatible. DO NOT rename existing columns.
 TRADE_CSV_COLUMNS = [
+    # Issue #26 (original) columns:
     "asset", "direction", "entry_time", "exit_time",
     "entry_price", "exit_price", "return_pct", "net_return_pct",
     "setup", "exit_reason", "bars_held", "funding_decision",
+    # Issue #34 vol_sizing additions (None when vol_sizing disabled):
+    "base_size", "vol_multiplier", "final_size",
+    "realized_vol_24", "vol_bucket",
+    "vol_q1", "vol_q2", "vol_q3",
 ]
 
 
@@ -385,6 +397,24 @@ def _run_config_replay(args: argparse.Namespace) -> int:
     funding_window_bars = int(funding_cfg.get("percentile_window_bars", 180))
     funding_missing_policy = str(funding_cfg.get("on_missing_data", "fail_open"))
 
+    # Issue #34 — vol_sizing replay parity. Reads the SAME ``vol_sizing:``
+    # config block Issue #33 added to the live yaml. Disabled by default;
+    # the default live yaml (``state/live_multiasset_long_short_funding.yaml``)
+    # has no vol_sizing block, so replay behaviour for that yaml is
+    # byte-for-byte unchanged.
+    vol_cfg = cfg.get("vol_sizing") or {}
+    vol_sizing_enabled = bool(vol_cfg.get("enabled"))
+    vol_window_bars = int(vol_cfg.get("window_bars",
+                                       VOL_SIZING_WINDOW_BARS_DEFAULT))
+    vol_train_months = int(vol_cfg.get("train_months",
+                                        VOL_SIZING_TRAIN_MONTHS_DEFAULT))
+    vol_mult_low = float(vol_cfg.get("mult_low",
+                                      VOL_SIZING_MULT_LOW_DEFAULT))
+    vol_mult_mid = float(vol_cfg.get("mult_mid",
+                                      VOL_SIZING_MULT_MID_DEFAULT))
+    vol_mult_high = float(vol_cfg.get("mult_high",
+                                       VOL_SIZING_MULT_HIGH_DEFAULT))
+
     print(f"{CYAN}{'='*70}{RESET}")
     print(f"{CYAN}REPLAY (multi-asset config mode) — {cfg_path.name}{RESET}")
     print(f"{CYAN}  assets={assets}  timeframe={timeframe}  "
@@ -396,6 +426,12 @@ def _run_config_replay(args: argparse.Namespace) -> int:
           + (f"  long_block>={funding_block_long}  "
              f"short_block<={funding_block_short}  "
              f"window={funding_window_bars}" if funding_enabled else "")
+          + f"{RESET}")
+    print(f"{CYAN}  vol_sizing={'ENABLED' if vol_sizing_enabled else 'disabled'}"
+          + (f"  window_bars={vol_window_bars}  "
+             f"train_months={vol_train_months}  "
+             f"mult=({vol_mult_low}/{vol_mult_mid}/{vol_mult_high})"
+             if vol_sizing_enabled else "")
           + f"{RESET}")
     print()
 
@@ -409,6 +445,24 @@ def _run_config_replay(args: argparse.Namespace) -> int:
             assets, percentile_window_bars=funding_window_bars,
             n_months_history=max(args.n_months + 6, 36),
             timeframe=timeframe,
+        )
+
+    # ---- vol_sizing overlay (Issue #34) — reuses the exact LiveVolSizingOverlay
+    # ---- class the live worker uses, including no-future-leak train-window
+    # ---- quartile thresholds. No replay-specific math.
+    vol_overlay: LiveVolSizingOverlay | None = None
+    if vol_sizing_enabled:
+        vol_overlay = LiveVolSizingOverlay(
+            assets, timeframe=timeframe,
+            window_bars=vol_window_bars,
+            train_months=vol_train_months,
+            mult_low=vol_mult_low,
+            mult_mid=vol_mult_mid,
+            mult_high=vol_mult_high,
+            # Load enough history that even the earliest replay bar has a
+            # populated train window.
+            load_history_months=max(args.n_months + vol_train_months + 3,
+                                     vol_train_months + 3),
         )
 
     # ---- timeline union (so BTC and ETH advance in lockstep) ----
@@ -459,6 +513,15 @@ def _run_config_replay(args: argparse.Namespace) -> int:
             funding_state = None
             if funding_overlay is not None:
                 funding_state = funding_overlay.state_at(asset, signal_row["ts"])
+
+            # Issue #34 — vol_sizing per-bar lookup. Same signal-bar timestamp
+            # the funding overlay uses; same semantics as multi_loop.run.
+            vol_state = None
+            if vol_overlay is not None:
+                vol_state = vol_overlay.state_at(asset, signal_row["ts"])
+            current_vol_mult = (float(vol_state["multiplier"])
+                                if vol_state is not None
+                                else 1.0)
 
             exit_event: dict | None = None
             enter_event: dict | None = None
@@ -514,6 +577,15 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                         "bars_held": bars_held,
                         "funding_decision": position.get("funding_decision_at_entry",
                                                          "n/a"),
+                        # Issue #34 — vol_sizing context locked at entry
+                        "base_size": position.get("base_size_at_entry"),
+                        "vol_multiplier": position.get("vol_multiplier_at_entry"),
+                        "final_size": float(position["size"]),
+                        "realized_vol_24": position.get("realized_vol_24_at_entry"),
+                        "vol_bucket": position.get("vol_bucket_at_entry"),
+                        "vol_q1": position.get("vol_q1_at_entry"),
+                        "vol_q2": position.get("vol_q2_at_entry"),
+                        "vol_q3": position.get("vol_q3_at_entry"),
                     })
                     exit_event = {
                         "direction": direction,
@@ -555,6 +627,10 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                             stop_val = float(
                                 signals.initial_stop(signal_row, setup_l, strategy)
                             )
+                            # Issue #34 — vol_sizing multiplier locks at entry.
+                            # final_size = size_per_asset * vol_mult; funding_allow
+                            # is already 1 here.
+                            final_size = size_per_asset * current_vol_mult
                             new_pos = {
                                 "asset": asset,
                                 "entry": entry_fill,
@@ -563,7 +639,19 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                 "stop": stop_val,
                                 "entry_i": i,
                                 "entry_ts": ts,
-                                "size": size_per_asset,
+                                "size": final_size,
+                                "base_size_at_entry": size_per_asset,
+                                "vol_multiplier_at_entry": current_vol_mult,
+                                "realized_vol_24_at_entry": (
+                                    vol_state.get("realized_vol") if vol_state else None),
+                                "vol_bucket_at_entry": (
+                                    vol_state.get("bucket") if vol_state else None),
+                                "vol_q1_at_entry": (
+                                    vol_state.get("q25") if vol_state else None),
+                                "vol_q2_at_entry": (
+                                    vol_state.get("q50") if vol_state else None),
+                                "vol_q3_at_entry": (
+                                    vol_state.get("q75") if vol_state else None),
                                 "funding_decision_at_entry": funding_decision,
                                 "funding_rate_at_entry": (
                                     funding_state.get("rate") if funding_state else None),
@@ -577,6 +665,8 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                 "entry": entry_fill,
                                 "stop": stop_val,
                                 "funding_decision": funding_decision,
+                                "vol_mult": current_vol_mult,
+                                "final_size": final_size,
                             }
                     if (not opened and positions_by_asset[asset] is None
                             and strategy.get("shorts", {}).get("enabled")):
@@ -603,6 +693,8 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                 stop_val = float(
                                     signals.initial_stop_short(signal_row, setup_s, strategy)
                                 )
+                                # Issue #34 — vol_sizing multiplier locks at entry.
+                                final_size = size_per_asset * current_vol_mult
                                 new_pos = {
                                     "asset": asset,
                                     "entry": entry_fill,
@@ -611,7 +703,19 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                     "stop": stop_val,
                                     "entry_i": i,
                                     "entry_ts": ts,
-                                    "size": size_per_asset,
+                                    "size": final_size,
+                                    "base_size_at_entry": size_per_asset,
+                                    "vol_multiplier_at_entry": current_vol_mult,
+                                    "realized_vol_24_at_entry": (
+                                        vol_state.get("realized_vol") if vol_state else None),
+                                    "vol_bucket_at_entry": (
+                                        vol_state.get("bucket") if vol_state else None),
+                                    "vol_q1_at_entry": (
+                                        vol_state.get("q25") if vol_state else None),
+                                    "vol_q2_at_entry": (
+                                        vol_state.get("q50") if vol_state else None),
+                                    "vol_q3_at_entry": (
+                                        vol_state.get("q75") if vol_state else None),
                                     "funding_decision_at_entry": funding_decision_s,
                                     "funding_rate_at_entry": (
                                         funding_state.get("rate") if funding_state else None),
@@ -625,6 +729,8 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                                     "entry": entry_fill,
                                     "stop": stop_val,
                                     "funding_decision": funding_decision_s,
+                                    "vol_mult": current_vol_mult,
+                                    "final_size": final_size,
                                 }
 
             # ----- per-asset display line -----
@@ -669,10 +775,16 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                 )
             if enter_event:
                 color = GREEN if enter_event["direction"] == "long" else RED
+                # Issue #34: include final size + vol multiplier when vol_sizing
+                # is on, matching the spec's example ENTER line.
+                vol_suffix = ""
+                if vol_overlay is not None:
+                    vol_suffix = (f" size={enter_event['final_size']:.4f} "
+                                  f"vol_mult={enter_event['vol_mult']:.2f}")
                 per_asset_lines.append(
                     f"{GRAY}[{ts_str}]{RESET} {asset} {color}ENTER {enter_event['direction']} "
                     f"{enter_event['setup']} @ {enter_event['entry']:.2f} "
-                    f"stop={enter_event['stop']:.2f}{RESET}"
+                    f"stop={enter_event['stop']:.2f}{vol_suffix}{RESET}"
                 )
             if funding_overlay is not None and (state_changed or not args.quiet_flat):
                 fs = funding_state or {"available": False}
@@ -689,6 +801,23 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                 else:
                     per_asset_lines.append(
                         f"  funding {asset} unavailable (fail_open)"
+                    )
+            # Issue #34 — vol_sizing verbose line on state-change bars, same
+            # format the live worker uses.
+            if vol_overlay is not None and (state_changed or not args.quiet_flat):
+                vs = vol_state or {"available": False}
+                if vs.get("available"):
+                    rv = vs.get("realized_vol")
+                    q1 = vs.get("q25"); q2 = vs.get("q50"); q3 = vs.get("q75")
+                    per_asset_lines.append(
+                        f"  vol {asset} rv24={rv*100:.2f}% "
+                        f"bucket={vs.get('bucket')} mult={vs.get('multiplier'):.2f} "
+                        f"q=[{q1*100:.2f}%,{q2*100:.2f}%,{q3*100:.2f}%]"
+                    )
+                else:
+                    per_asset_lines.append(
+                        f"  vol {asset} warmup / insufficient history; "
+                        f"fail-open mult=1.00"
                     )
             if funding_block_msg:
                 per_asset_lines.append(f"  blocked_by: {funding_block_msg}")
@@ -760,6 +889,15 @@ def _run_config_replay(args: argparse.Namespace) -> int:
                 "exit_reason": "end_of_data",
                 "bars_held": bars_held,
                 "funding_decision": cur_pos.get("funding_decision_at_entry", "n/a"),
+                # Issue #34 — vol_sizing context locked at entry
+                "base_size": cur_pos.get("base_size_at_entry"),
+                "vol_multiplier": cur_pos.get("vol_multiplier_at_entry"),
+                "final_size": float(cur_pos["size"]),
+                "realized_vol_24": cur_pos.get("realized_vol_24_at_entry"),
+                "vol_bucket": cur_pos.get("vol_bucket_at_entry"),
+                "vol_q1": cur_pos.get("vol_q1_at_entry"),
+                "vol_q2": cur_pos.get("vol_q2_at_entry"),
+                "vol_q3": cur_pos.get("vol_q3_at_entry"),
             })
             print(f"{GRAY}[{last_ts.strftime('%Y-%m-%d %H:%M')}]{RESET} "
                   f"{asset} {YELLOW}EXIT (end of data) "
@@ -816,6 +954,23 @@ def _run_config_replay(args: argparse.Namespace) -> int:
     print(f"  trades by asset        {by_asset}")
     print(f"  trades by direction    {by_direction}")
     print(f"  trades by exit reason  {by_reason}")
+    # Issue #34 — vol_sizing summary (when enabled in this config)
+    if vol_overlay is not None:
+        vol_mults = [t.get("vol_multiplier") for t in closed_trades
+                     if t.get("vol_multiplier") is not None]
+        final_sizes = [t.get("final_size") for t in closed_trades
+                       if t.get("final_size") is not None]
+        if vol_mults:
+            mean_mult = sum(vol_mults) / len(vol_mults)
+            mean_final = sum(final_sizes) / len(final_sizes)
+            buckets: dict[str, int] = {}
+            for t in closed_trades:
+                b = t.get("vol_bucket")
+                if b is not None:
+                    buckets[b] = buckets.get(b, 0) + 1
+            print(f"  vol_sizing mean mult   {mean_mult:.3f}")
+            print(f"  vol_sizing mean size   {mean_final:.4f}")
+            print(f"  vol_sizing by bucket   {buckets}")
     print()
     print(f"{GRAY}Note: replay is in-sample on the full window. For OOS "
           f"adoption-quality numbers, run scripts/run_*.py (walk-forward).{RESET}")

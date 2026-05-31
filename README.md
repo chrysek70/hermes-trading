@@ -405,6 +405,13 @@ Closed-trade rows on `state/trades.jsonl` carry `base_size`,
 Heartbeat (`state/heartbeat.json`) carries the same per-asset block
 plus `vol_sizing_enabled: true`.
 
+**Replay matches** (Issue #34): `scripts/replay_live.py --config
+state/live_multiasset_long_short_funding_vol.yaml …` applies the
+exact same `LiveVolSizingOverlay` and produces the same vol-context
+fields on the trade CSV, the same `vol BTC/USDT rv24=… bucket=Q…
+mult=…` verbose line, and the same `size=… vol_mult=…` ENTER line
+the live worker emits.
+
 ## Replay mode (Issue #26)
 
 `scripts/replay_live.py` walks historical bars through the same

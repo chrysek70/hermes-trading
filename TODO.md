@@ -5,6 +5,19 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Replay vol_sizing parity (Issue #34). `scripts/replay_live.py`
+  now applies the `LiveVolSizingOverlay` from `multi_loop.py` when
+  the config has `vol_sizing.enabled: true` — closing a parity gap
+  introduced when Issue #33 added vol_sizing to live but did not
+  update replay. Boot header / ENTER lines / verbose vol line /
+  summary all match the live worker. Trade CSV gains 8 vol fields
+  appended after the original 12 Issue #26 columns (backward
+  compat preserved). 3-month replay before/after: same 6 trades,
+  loss reduced from −9.61% to **−6.04%** at mean vol mult 0.583.
+  280/280 multi-asset self-tests pass (was 260; +20 from Section
+  17). `signals.py` / `multi_loop.py` / live configs / strategy
+  yamls all unchanged.
+
 - ✓ Online walk-forward adaptive learning simulator (Issue #32) —
   research-only. `scripts/run_online_walk_forward.py` replays
   every 4h closed bar as if it were live, with strict

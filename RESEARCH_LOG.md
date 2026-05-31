@@ -512,6 +512,57 @@ Outputs:
 Tests: 21 new checks in Section 15 of
 `scripts/test_multiasset_worker.py`. 260/260 pass.
 
+## Replay vol_sizing parity (Issue #34) — shipped
+
+Bug fix: `scripts/replay_live.py --config state/live_multiasset_long_short_funding_vol.yaml`
+was running the funding overlay correctly but ignoring the
+`vol_sizing:` block Issue #33 added — so the replay reported
+identical losses to the no-vol config. Root cause: replay's
+`_run_config_replay` predates Issue #33 and was never updated.
+
+Fix wires the existing `LiveVolSizingOverlay` (from
+`hermes_trading.multi_loop`) into the replay's config-mode entry
+path. No new vol math — uses the same class the live worker uses
+with the same locked Issue #27 parameters (window_bars=24 /
+train_months=12 / mult=1.0/0.5/0.25). At entry,
+`final_size = size_per_asset × funding_allow × vol_multiplier`. The
+vol multiplier locks at entry; never resizes open positions.
+
+Replay boot header now includes `vol_sizing=ENABLED ...` when the
+yaml's `vol_sizing.enabled: true`. ENTER lines show
+`size=… vol_mult=…`. Per state-change bars now log a
+`vol BTC/USDT rv24=…% bucket=Q… mult=… q=[…]` line matching the
+live worker's verbose format. End-of-run summary adds
+`vol_sizing mean mult`, `vol_sizing mean size`, `vol_sizing by
+bucket`. Trade-output CSV gains 8 columns appended after the
+original Issue #26 12-column prefix (preserved for backward
+compat): `base_size`, `vol_multiplier`, `final_size`,
+`realized_vol_24`, `vol_bucket`, `vol_q1`, `vol_q2`, `vol_q3`.
+
+Before / after on the 3-month window:
+
+| config | trades | return | DD | mean vol mult |
+|---|---:|---:|---:|---:|
+| `funding.yaml` (no vol) | 6 | -9.61% | 9.61% | n/a |
+| `funding_vol.yaml` (Issue #34) | 6 | **-6.04%** | **6.04%** | 0.583 |
+
+Same 6 entries / exits (sizing doesn't gate signals); ~37%
+smaller realized loss because chop entries sized to 0.5× the base.
+Bucket distribution: 5 trades Q2_Q3, 1 trade Q1.
+
+Tests added as Section 17 of `scripts/test_multiasset_worker.py`
+(20 checks: import surface, locked defaults, CSV schema preserves
+Issue #26 prefix + appends Issue #34 fields, source-level wiring
+confirms each spec contract, opt-in yaml has vol_sizing enabled,
+existing yaml has no vol_sizing block). 280/280 total multi-asset
+checks pass (was 260). 14/14 decay-monitor checks pass.
+`py_compile hermes_trading/*.py scripts/*.py` clean. Legacy
+`--strategy` replay path bit-for-bit identical (4 trades,
++1.79%, DD 1.61%, PF 2.13).
+
+Live worker unchanged. `signals.py` unchanged. All `state/*.yaml`
+unchanged.
+
 ## Vol-sizing overlay wired opt-in to live (Issue #33) — shipped
 
 After Issues #27 (research), #27 follow-up (`research/recent_adaptation_sizing_report.md`)

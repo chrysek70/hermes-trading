@@ -905,16 +905,18 @@ def main() -> int:
     check("replay_live exposes TRADE_CSV_COLUMNS",
           isinstance(getattr(replay_mod, "TRADE_CSV_COLUMNS", None), list))
 
-    # CSV columns match the Issue #26 spec EXACTLY (order matters — it's
-    # the on-disk schema).
+    # CSV columns: Issue #26 spec is the first 12 columns (order matters —
+    # it's the on-disk schema). Issue #34 appends 8 vol_sizing fields
+    # AFTER these. The Issue #26 prefix must remain stable so external
+    # readers parsing by column count keep working.
     expected_cols = [
         "asset", "direction", "entry_time", "exit_time",
         "entry_price", "exit_price", "return_pct", "net_return_pct",
         "setup", "exit_reason", "bars_held", "funding_decision",
     ]
-    check("TRADE_CSV_COLUMNS matches Issue #26 spec",
-          replay_mod.TRADE_CSV_COLUMNS == expected_cols,
-          f"got {replay_mod.TRADE_CSV_COLUMNS}")
+    check("TRADE_CSV_COLUMNS preserves Issue #26 spec in the first 12 columns",
+          replay_mod.TRADE_CSV_COLUMNS[:12] == expected_cols,
+          f"got first 12: {replay_mod.TRADE_CSV_COLUMNS[:12]}")
 
     # Asset / symbol round-trip helpers
     check("_asset_label_from_symbol(BTCUSDT) == 'BTC/USDT'",
@@ -1812,6 +1814,93 @@ def main() -> int:
         check("ADAPTIVE_RULES contains the 6 spec rules",
               set(sim_mod.ADAPTIVE_RULES) == set(spec_rules),
               f"got {sim_mod.ADAPTIVE_RULES}")
+    print()
+
+    # --- 17. Replay vol_sizing parity (Issue #34)
+    print("17. Replay vol_sizing parity (Issue #34)")
+    import importlib.util as _ilu_17
+    replay_path_17 = ROOT / "scripts" / "replay_live.py"
+    spec_17 = _ilu_17.spec_from_file_location("replay_live_17", replay_path_17)
+    replay_mod_17 = _ilu_17.module_from_spec(spec_17)
+    spec_17.loader.exec_module(replay_mod_17)
+
+    # 17.1 Replay module imports LiveVolSizingOverlay and the Issue #33 constants
+    check("replay imports LiveVolSizingOverlay",
+          getattr(replay_mod_17, "LiveVolSizingOverlay", None) is not None)
+    check("replay imports VOL_SIZING_WINDOW_BARS_DEFAULT",
+          getattr(replay_mod_17, "VOL_SIZING_WINDOW_BARS_DEFAULT", None) == 24)
+    check("replay imports VOL_SIZING_TRAIN_MONTHS_DEFAULT",
+          getattr(replay_mod_17, "VOL_SIZING_TRAIN_MONTHS_DEFAULT", None) == 12)
+
+    # 17.2 Trade-CSV column spec includes Issue #34 vol fields (positionally
+    # appended after the Issue #26 columns so external readers parsing the
+    # first 12 columns still work).
+    cols_17 = replay_mod_17.TRADE_CSV_COLUMNS
+    issue26_cols = [
+        "asset", "direction", "entry_time", "exit_time",
+        "entry_price", "exit_price", "return_pct", "net_return_pct",
+        "setup", "exit_reason", "bars_held", "funding_decision",
+    ]
+    check("TRADE_CSV_COLUMNS preserves Issue #26 columns (first 12, in order)",
+          cols_17[:12] == issue26_cols,
+          f"got first 12: {cols_17[:12]}")
+    issue34_cols = [
+        "base_size", "vol_multiplier", "final_size",
+        "realized_vol_24", "vol_bucket",
+        "vol_q1", "vol_q2", "vol_q3",
+    ]
+    check("TRADE_CSV_COLUMNS appends Issue #34 vol fields (8 columns)",
+          cols_17[12:20] == issue34_cols,
+          f"got cols 12..20: {cols_17[12:20]}")
+
+    # 17.3 Source-level wiring confirms the spec contract
+    replay_src_17 = replay_path_17.read_text()
+    check("replay reads vol_sizing block from cfg",
+          'cfg.get("vol_sizing")' in replay_src_17)
+    check("replay flag vol_sizing_enabled is parsed",
+          "vol_sizing_enabled" in replay_src_17)
+    check("replay instantiates LiveVolSizingOverlay when enabled",
+          "vol_overlay = LiveVolSizingOverlay(" in replay_src_17)
+    check("replay logs vol_sizing=ENABLED on boot",
+          "vol_sizing=" in replay_src_17
+          and "'ENABLED' if vol_sizing_enabled" in replay_src_17)
+    check("replay calls vol_overlay.state_at on signal_row[ts]",
+          'vol_overlay.state_at(asset, signal_row["ts"])' in replay_src_17)
+    check("replay applies vol_mult at LONG entry (final_size = base * mult)",
+          "size_per_asset * current_vol_mult" in replay_src_17)
+    check("replay records base_size_at_entry / vol_multiplier_at_entry on position",
+          '"base_size_at_entry": size_per_asset' in replay_src_17
+          and '"vol_multiplier_at_entry": current_vol_mult' in replay_src_17)
+    check("replay records realized_vol_24 / vol_bucket / vol_q* on position",
+          '"realized_vol_24_at_entry"' in replay_src_17
+          and '"vol_bucket_at_entry"' in replay_src_17
+          and '"vol_q1_at_entry"' in replay_src_17)
+    check("replay carries vol fields onto closed trade row",
+          '"base_size": position.get("base_size_at_entry")' in replay_src_17
+          and '"vol_multiplier": position.get("vol_multiplier_at_entry")' in replay_src_17
+          and '"realized_vol_24": position.get("realized_vol_24_at_entry")' in replay_src_17)
+    check("replay end-of-data close also writes vol fields",
+          '"base_size": cur_pos.get("base_size_at_entry")' in replay_src_17)
+    check("replay emits per-bar verbose vol line on state change",
+          '"  vol {asset} rv24=' in replay_src_17
+          and "bucket=" in replay_src_17 and "mult=" in replay_src_17)
+    check("replay ENTER line shows size=… vol_mult=…",
+          'vol_mult={enter_event[\'vol_mult\']:.2f}' in replay_src_17)
+    check("replay summary block reports vol_sizing mean mult + by bucket",
+          'vol_sizing mean mult' in replay_src_17
+          and "vol_sizing by bucket" in replay_src_17)
+
+    # 17.4 New live yaml has vol_sizing.enabled True (re-confirms the wiring
+    # target exists with the right schema after Issue #33)
+    vol_cfg_17 = yaml.safe_load(open(ROOT / "state" / "live_multiasset_long_short_funding_vol.yaml"))
+    check("opt-in yaml: vol_sizing.enabled True (the trigger for replay parity)",
+          vol_cfg_17["vol_sizing"]["enabled"] is True)
+
+    # 17.5 Existing non-vol yaml has no vol_sizing block — confirms
+    # backward-compat detection (replay must default to disabled).
+    base_cfg_17 = yaml.safe_load(open(ROOT / "state" / "live_multiasset_long_short_funding.yaml"))
+    check("existing yaml has no vol_sizing block (backward-compat trigger)",
+          "vol_sizing" not in base_cfg_17)
     print()
 
     if failures:
