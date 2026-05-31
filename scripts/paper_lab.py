@@ -565,17 +565,13 @@ def _is_event_line(line: str) -> bool:
 
 def cmd_logs(args: argparse.Namespace) -> int:
     if args.variant == "all":
-        # Multi-tail: stream all variants concurrently, prefixing each
-        # line with its variant name so a single terminal can watch
-        # the whole lab at once. Requires --follow.
-        if not args.follow:
-            print("--variant all only makes sense with --follow", file=sys.stderr)
-            return 2
-        return _cmd_logs_follow_all(args.lines, args.events)
+        if args.follow:
+            return _cmd_logs_follow_all(args.lines, args.events)
+        return _cmd_logs_oneshot_all(args.lines, args.events)
 
     if args.variant not in VARIANTS:
         print(f"unknown variant: {args.variant}", file=sys.stderr)
-        print(f"available: {', '.join(VARIANTS.keys())} (or 'all' with --follow)",
+        print(f"available: {', '.join(VARIANTS.keys())} (or 'all', default)",
               file=sys.stderr)
         return 2
     p = _log_file(args.variant)
@@ -600,6 +596,37 @@ def cmd_logs(args: argparse.Namespace) -> int:
     else:
         for line in lines[-n:]:
             print(line)
+    return 0
+
+
+def _cmd_logs_oneshot_all(tail_lines: int, events_only: bool) -> int:
+    """One-shot snapshot across all variants. Prefixes each line with [variant].
+
+    In events-only mode, emits only actionable lines per variant; if no
+    variant has any event, prints a single clarifying banner.
+    """
+    any_emitted = False
+    for name in VARIANTS:
+        p = _log_file(name)
+        if not p.exists():
+            continue
+        lines = p.read_text(errors="replace").splitlines()
+        if events_only:
+            lines = [ln for ln in lines if _is_event_line(ln)]
+        if not lines:
+            continue
+        any_emitted = True
+        print(f"--- [{name}] last {min(tail_lines, len(lines))} "
+              f"{'events' if events_only else 'lines'} ---")
+        for ln in lines[-tail_lines:]:
+            print(f"[{name}] {ln}")
+    if not any_emitted:
+        if events_only:
+            print("# no actionable events across any variant")
+            print("# (workers are polling; SuperTrend has not flipped, "
+                  "no gate has fired)")
+        else:
+            print("# no logs available across any variant")
     return 0
 
 
@@ -1041,6 +1068,27 @@ def cmd_self_test(args: argparse.Namespace) -> int:
     check("argparse: no --events -> events=False",
           ns_default.events is False)
 
+    # 12a. UX fix: --variant is OPTIONAL and defaults to 'all'.
+    # Rebuild the parser with the production defaults (the earlier
+    # parser_t built test-only flags above; recreate to mirror main()).
+    parser_u = argparse.ArgumentParser(prog="paper_lab")
+    sub_u = parser_u.add_subparsers(dest="cmd")
+    p_logs_u = sub_u.add_parser("logs")
+    p_logs_u.add_argument("--variant", default="all")
+    p_logs_u.add_argument("--lines", type=int, default=50)
+    p_logs_u.add_argument("--follow", "-f", "--tail",
+                           action="store_true", dest="follow")
+    p_logs_u.add_argument("--events", action="store_true")
+    ns_no_variant = parser_u.parse_args(["logs", "--events"])
+    check("argparse: --variant defaults to 'all' when omitted",
+          ns_no_variant.variant == "all",
+          f"got {ns_no_variant.variant!r}")
+    ns_no_variant_no_events = parser_u.parse_args(["logs"])
+    check("argparse: bare `logs` -> variant='all', events=False, follow=False",
+          ns_no_variant_no_events.variant == "all"
+          and ns_no_variant_no_events.events is False
+          and ns_no_variant_no_events.follow is False)
+
     if failures:
         print(f"\nSELF-TEST FAILED ({failures})")
         return 1
@@ -1061,8 +1109,8 @@ def main(argv: list[str]) -> int:
     sub.add_parser("compare")
 
     p_logs = sub.add_parser("logs")
-    p_logs.add_argument("--variant", required=True,
-                        help="variant name, or 'all' (with --follow/--tail)")
+    p_logs.add_argument("--variant", default="all",
+                        help="variant name, or 'all' (default)")
     p_logs.add_argument("--lines", type=int, default=50)
     p_logs.add_argument("--follow", "-f", "--tail", action="store_true",
                         dest="follow",
