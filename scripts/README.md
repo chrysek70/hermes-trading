@@ -25,7 +25,7 @@ worker's state files.
 | `run_long_short_overlays.py` | Overlay sweep on the BTC/ETH SuperTrend long-short variant. 6 variants (baseline + HMM filter/sizing + funding filter/sizing + RS sizing) with direction-aware mapping. **Funding filter passed primary adoption.** | #20 |
 | `monitor_strategy_decay.py` | Live decay monitor. Reads `state/trades.jsonl`, computes rolling PF / DD / win-rate / consecutive-losses over configurable windows, compares to research-time baselines. Exit codes 0 / 1 / 2 for OK / DEGRADED / insufficient. Monitor-only. | #15 |
 | `test_multiasset_worker.py` | Self-test for the multi-asset live paper worker. No exchange, no network. Covers single-asset import sanity, config parse, portfolio cap, per-asset cap, legacy state migration with backup, corrupt-state tolerance, trade row schema, end-to-end `evaluate_tick`, the SuperTrend tick-display auto-detect (Issue #17), "why no trade" verbose diagnostics (Issue #18), the funding-overlay gate / live config wiring (Issue #21), **and the display timezone formatter (Issue #22)**. | #16, #17, #18, #21, #22 |
-| `replay_live.py` | Replay mode — feed historical bars through the live engine at any speed. Educational / intuition-building tool. Does not trade, does not write to `state/`. | — |
+| `replay_live.py` | Replay mode — feed historical bars through the live engine at any speed. Two modes: legacy `--strategy <yaml>` (single asset) and `--config <multi-asset yaml>` (BTC + ETH together, funding filter, portfolio cap — Issue #26). Matches live closed-bar semantics (Issue #24). Optional `--trades-out` CSV. Educational / intuition-building tool. Does not trade, does not write to `state/`. | #26 |
 | `test_markov_regime.py` | Unit-style validators for the Markov module. Not an experiment. | — |
 
 ## How to run
@@ -53,10 +53,20 @@ uv run python scripts/run_multiasset_supertrend_rs.py
 uv run python scripts/run_markov_research.py --n-months 48
 
 # Replay mode — watch what the bot WOULD have done on history
-# (educational; not an experiment)
+# (educational; not an experiment).
+#
+# Legacy single-asset path (unchanged):
 uv run python scripts/replay_live.py \
     --strategy state/strategy_supertrend.yaml \
     --n-months 24 --bars-per-second 20 --quiet-flat
+
+# Multi-asset config path (Issue #26) — replays the SAME config the
+# live worker reads, including BTC + ETH, the funding filter, and
+# the portfolio cap. Optional --trades-out writes a per-trade CSV.
+uv run python scripts/replay_live.py \
+    --config state/live_multiasset_long_short_funding.yaml \
+    --n-months 24 --bars-per-second 20 --quiet-flat \
+    --trades-out results/replay_trades_$(date +%Y%m%d_%H%M%S).csv
 
 # Decay monitor — is the live paper strategy drifting from research?
 uv run python scripts/monitor_strategy_decay.py

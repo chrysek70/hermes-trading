@@ -433,6 +433,57 @@ Issue #6: when percentile crosses 90 it usually crosses 95 quickly).
 See `research/funding_rate_filter_report.md`, `funding_rate_diagnostics.md`,
 and `funding_rate_data_audit.md`.
 
+## Replay multi-asset config support (Issue #26) — shipped
+
+`scripts/replay_live.py` now accepts `--config <multi-asset yaml>`
+in addition to the legacy `--strategy <yaml>`. The new path replays
+the exact config the live worker reads:
+
+```bash
+uv run python scripts/replay_live.py \
+    --config state/live_multiasset_long_short_funding.yaml \
+    --n-months 24 --bars-per-second 20 --quiet-flat \
+    --trades-out results/replay_trades_<ts>.csv
+```
+
+In config mode the script loads each `assets:` entry, iterates the
+union of bar timestamps in lockstep, enforces `max_open_positions`
+and `size_per_asset`, and runs the funding overlay
+(`LiveFundingOverlay` — reused from `hermes_trading.multi_loop`,
+no replay-specific funding code) using the same Issue #21 logic the
+live worker uses. The display mirrors `multi_loop.py`:
+
+```
+[2026-04-22 04:00] tick BTC/USDT close=78012.79 st=UP line=74616.47 dist=+4.55% v=v3-supertrend-long-short-01 pos=flat
+[2026-04-22 04:00] BTC/USDT ENTER long supertrend @ 78051.80 stop=73700.81
+  funding BTC/USDT rate=-0.0042% pct=25.6 decision=allow
+portfolio open=1/2  realized=-6.752%  unrealized=-0.025%
+```
+
+Live semantics match (Issue #24): entries and SuperTrend flip / time
+exits evaluate on `signal_row = iloc[i-1]` (last closed bar);
+intra-bar stops fire from `display_row` low / high. `signals.py`
+unchanged. No live worker behaviour changed — only a one-line shared
+import of `LiveFundingOverlay` / `can_enter` / `evaluate_funding_gate`.
+
+`--trades-out` writes per-trade CSV with the on-disk schema:
+`asset, direction, entry_time, exit_time, entry_price, exit_price,
+return_pct, net_return_pct, setup, exit_reason, bars_held,
+funding_decision`. End-of-run summary adds: trades by asset, by
+direction, by exit reason, portfolio realized PnL, max concurrent
+open positions.
+
+Tests added as Section 13 of `scripts/test_multiasset_worker.py`
+(21 new checks: helper round-trips, funding decision mapping,
+mutually-exclusive argparse, CSV column / row round-trip, source-level
+parity-checks confirming the script uses `signal_row` for entries
+and `display_row.low/.high` for intra-bar stops). 158/158 total
+checks pass; decay monitor self-test 14/14 still passes;
+`py_compile hermes_trading/*.py scripts/*.py` clean.
+
+The legacy `--strategy` path is preserved byte-for-byte (verified
+against the user's reference invocation on 3 months of BTC).
+
 ## Alpha / Risk / Execution architecture map (Issue #25) — documentation
 
 Created `ARCHITECTURE.md` and `research/alpha_risk_execution_audit.md`

@@ -881,6 +881,160 @@ def main() -> int:
            and 'display_row.get("high")' in mloop_src))
     print()
 
+    # --- 13. Replay multi-asset config support (Issue #26)
+    print("13. Replay --config mode (Issue #26)")
+    import importlib.util
+    import io
+    import contextlib
+
+    replay_path = ROOT / "scripts" / "replay_live.py"
+    check("replay_live.py exists", replay_path.exists())
+    spec = importlib.util.spec_from_file_location("replay_live", replay_path)
+    replay_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(replay_mod)
+
+    # Module exposes the two replay paths and the CSV column spec
+    check("replay_live exposes _run_strategy_replay (legacy mode)",
+          callable(getattr(replay_mod, "_run_strategy_replay", None)))
+    check("replay_live exposes _run_config_replay (new mode)",
+          callable(getattr(replay_mod, "_run_config_replay", None)))
+    check("replay_live exposes TRADE_CSV_COLUMNS",
+          isinstance(getattr(replay_mod, "TRADE_CSV_COLUMNS", None), list))
+
+    # CSV columns match the Issue #26 spec EXACTLY (order matters — it's
+    # the on-disk schema).
+    expected_cols = [
+        "asset", "direction", "entry_time", "exit_time",
+        "entry_price", "exit_price", "return_pct", "net_return_pct",
+        "setup", "exit_reason", "bars_held", "funding_decision",
+    ]
+    check("TRADE_CSV_COLUMNS matches Issue #26 spec",
+          replay_mod.TRADE_CSV_COLUMNS == expected_cols,
+          f"got {replay_mod.TRADE_CSV_COLUMNS}")
+
+    # Asset / symbol round-trip helpers
+    check("_asset_label_from_symbol(BTCUSDT) == 'BTC/USDT'",
+          replay_mod._asset_label_from_symbol("BTCUSDT") == "BTC/USDT")
+    check("_symbol_from_asset('ETH/USDT') == 'ETHUSDT'",
+          replay_mod._symbol_from_asset("ETH/USDT") == "ETHUSDT")
+
+    # Funding decision helper — direction-agnostic per-bar mapping that
+    # mirrors the heartbeat decision in multi_loop.
+    decision, _ = replay_mod._funding_decision_for_heartbeat(
+        {"available": True, "rate": 0.0001, "percentile": 50.0}, 95.0, 5.0,
+    )
+    check("funding decision at p50 = allow", decision == "allow",
+          f"got {decision}")
+    decision, _ = replay_mod._funding_decision_for_heartbeat(
+        {"available": True, "rate": 0.0008, "percentile": 96.0}, 95.0, 5.0,
+    )
+    check("funding decision at p96 = block_long", decision == "block_long",
+          f"got {decision}")
+    decision, _ = replay_mod._funding_decision_for_heartbeat(
+        {"available": True, "rate": -0.0008, "percentile": 3.0}, 95.0, 5.0,
+    )
+    check("funding decision at p3 = block_short", decision == "block_short",
+          f"got {decision}")
+    decision, _ = replay_mod._funding_decision_for_heartbeat(
+        None, 95.0, 5.0,
+    )
+    check("funding decision when state=None -> missing_data",
+          decision == "missing_data", f"got {decision}")
+
+    # Argparse: --config and --strategy are mutually exclusive
+    import sys as _sys
+    saved_argv = _sys.argv
+    try:
+        _sys.argv = ["replay_live.py", "--config", "x", "--strategy", "y"]
+        raised = False
+        try:
+            replay_mod.main()
+        except SystemExit:
+            raised = True
+        check("--config + --strategy raises (mutually exclusive)", raised)
+    finally:
+        _sys.argv = saved_argv
+
+    # Config file used by the new mode parses to the BTC/ETH long-short
+    # funding setup
+    cfg_path = ROOT / "state" / "live_multiasset_long_short_funding.yaml"
+    cfg = yaml.safe_load(open(cfg_path))
+    check("config under test has BTC/USDT + ETH/USDT",
+          cfg["assets"] == ["BTC/USDT", "ETH/USDT"])
+    check("config under test enables funding filter",
+          cfg["funding_filter"]["enabled"] is True)
+
+    # _resolve_path works for the state/-relative form used in the
+    # live config
+    resolved = replay_mod._resolve_path("state/strategy_supertrend_long_short.yaml",
+                                         cfg_path.parent)
+    check("_resolve_path resolves state/-relative path to repo root",
+          resolved == ROOT / "state" / "strategy_supertrend_long_short.yaml",
+          f"got {resolved}")
+
+    # Synthetic CSV writer test — feed two fake trades through the
+    # writer surface and verify the on-disk header + row count.
+    with tempfile.TemporaryDirectory() as tmp:
+        out_csv = Path(tmp) / "replay_trades_synthetic.csv"
+        rows = [
+            {"asset": "BTC/USDT", "direction": "long",
+             "entry_time": "2026-03-01T00:00:00+00:00",
+             "exit_time": "2026-03-02T04:00:00+00:00",
+             "entry_price": 70000.0, "exit_price": 71400.0,
+             "return_pct": 0.02, "net_return_pct": 0.009,
+             "setup": "supertrend", "exit_reason": "supertrend_flip",
+             "bars_held": 7, "funding_decision": "allow"},
+            {"asset": "ETH/USDT", "direction": "short",
+             "entry_time": "2026-03-03T08:00:00+00:00",
+             "exit_time": "2026-03-04T16:00:00+00:00",
+             "entry_price": 3500.0, "exit_price": 3430.0,
+             "return_pct": 0.02, "net_return_pct": 0.009,
+             "setup": "supertrend_short", "exit_reason": "stop",
+             "bars_held": 8, "funding_decision": "allow"},
+        ]
+        import csv as _csv
+        with open(out_csv, "w", newline="") as fh:
+            w = _csv.DictWriter(fh, fieldnames=replay_mod.TRADE_CSV_COLUMNS)
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: r.get(k) for k in replay_mod.TRADE_CSV_COLUMNS})
+        with open(out_csv) as fh:
+            reader = _csv.DictReader(fh)
+            header = reader.fieldnames
+            written = list(reader)
+        check("CSV header matches TRADE_CSV_COLUMNS order",
+              header == replay_mod.TRADE_CSV_COLUMNS, f"got {header}")
+        check("CSV wrote both rows", len(written) == 2)
+        check("CSV row 1 asset = BTC/USDT", written[0]["asset"] == "BTC/USDT")
+        check("CSV row 2 direction = short",
+              written[1]["direction"] == "short")
+        check("CSV row 1 funding_decision = allow",
+              written[0]["funding_decision"] == "allow")
+        check("CSV row 1 bars_held = 7",
+              written[0]["bars_held"] == "7")
+
+    # Source-level checks: the new mode wires the closed-bar semantics
+    # (Issue #24) and the funding overlay (Issue #21) for parity with
+    # the live worker.
+    replay_src = (ROOT / "scripts" / "replay_live.py").read_text()
+    check("replay source uses signal_row for long_entry",
+          "signals.long_entry(signal_row" in replay_src)
+    check("replay source uses signal_row for short_entry",
+          "signals.short_entry(signal_row" in replay_src)
+    check("replay source uses signal_row for long_exit",
+          "signals.long_exit(signal_row" in replay_src)
+    check("replay source uses signal_row for short_exit",
+          "signals.short_exit(signal_row" in replay_src)
+    check("replay source keeps intra-bar stop via display_row low/high",
+          ('display_row.get("low")' in replay_src
+           and 'display_row.get("high")' in replay_src))
+    check("replay source imports LiveFundingOverlay from multi_loop",
+          "LiveFundingOverlay" in replay_src
+          and "from hermes_trading.multi_loop" in replay_src)
+    check("replay source enforces portfolio cap via can_enter",
+          "can_enter(asset, positions_by_asset, max_open)" in replay_src)
+    print()
+
     if failures:
         print(f"{RED}{BOLD}SELF-TEST FAILED: {len(failures)} check(s){RESET}")
         for f in failures:

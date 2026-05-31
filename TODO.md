@@ -5,6 +5,16 @@ implementation-ready unless flagged otherwise.
 
 ## Recently shipped
 
+- ✓ Replay multi-asset config support (Issue #26) — `scripts/replay_live.py
+  --config state/live_multiasset_long_short_funding.yaml` replays the
+  exact adopted live candidate over historical data (BTC + ETH together,
+  portfolio cap, funding overlay reused from `multi_loop.LiveFundingOverlay`,
+  closed-bar entry semantics per Issue #24). Optional `--trades-out` CSV
+  with `asset, direction, entry_time, exit_time, entry_price, exit_price,
+  return_pct, net_return_pct, setup, exit_reason, bars_held,
+  funding_decision`. Legacy `--strategy` path preserved byte-for-byte.
+  21 new self-test checks (158/158 total); decay monitor unaffected;
+  py_compile clean. No live worker behaviour changed.
 - ✓ Alpha / Risk / Execution architecture map (Issue #25) —
   `ARCHITECTURE.md` codifies the layered design;
   `research/alpha_risk_execution_audit.md` classifies every

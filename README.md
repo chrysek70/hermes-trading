@@ -358,6 +358,40 @@ on this universe). PF and DD both improve marginally on the parallel
 portfolio. Not a primary strategy. See
 `research/funding_rate_filter_report.md`.
 
+## Replay mode (Issue #26)
+
+`scripts/replay_live.py` walks historical bars through the same
+`signals` module the live worker uses, at any speed:
+
+```bash
+# Legacy single-asset path (unchanged):
+uv run python scripts/replay_live.py \
+    --strategy state/strategy_supertrend_long_short.yaml \
+    --n-months 24 --bars-per-second 20 --quiet-flat
+
+# Multi-asset config path (Issue #26) — replays the same config the
+# live worker reads, including BTC + ETH, the funding filter, and
+# the portfolio cap:
+uv run python scripts/replay_live.py \
+    --config state/live_multiasset_long_short_funding.yaml \
+    --n-months 24 --bars-per-second 20 --quiet-flat \
+    --trades-out results/replay_trades_$(date +%Y%m%d_%H%M%S).csv
+```
+
+In both modes, entry / SuperTrend flip / time exits evaluate on the
+most recently CLOSED bar (matches Issue #24); stops can still fire
+intra-bar on the current bar's low / high. In `--config` mode the
+script also enforces `max_open_positions`, looks up historical
+funding by signal-bar timestamp via the live worker's
+`LiveFundingOverlay`, and emits the same `tick … st=UP line=… pos=…`
+display lines `multi_loop.py` produces. The `--trades-out` CSV
+columns are: `asset, direction, entry_time, exit_time, entry_price,
+exit_price, return_pct, net_return_pct, setup, exit_reason,
+bars_held, funding_decision`.
+
+Replay is research / educational tooling. It does NOT trade, does
+NOT write to `state/`, and is independent of the live worker.
+
 ## Live decay monitor (Issue #15)
 
 `scripts/monitor_strategy_decay.py` reads the live worker's
